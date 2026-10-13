@@ -31,12 +31,42 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 
-# 已知污染词(v4.12 changelog 案例)
+# 已知污染词(v4.12 changelog 案例 + v4.21 B2 扩到 41 条)
+# 来源:references/asr_corrections.yaml 41 条 ASR 易错词(同源数据)
+# 这些词在 ASR 输出后 _post_terms_fix 应已替换为 to;
+# 残留 = 上一步漏掉,需手动 Edit 修复。
 CORRUPTION_TOKENS = [
+    # v4.12 原 3 条
     '医疗器械标签',  # 鬼脚七线下课 '|' → '医疗器械标签' 表格污染
     '同价位',        # 同 product 同价位
     '店铺绩效',
+    # v4.21 B2 新增 38 条(从 asr_corrections.yaml 41 条取,排除 GGC/AI助力 等英文)
+    # 长词(4-7 字)
+    '皮气护理', '最大化作间法', '相产品均头', '相产品国际',
+    '建国资产', '数据筛毯', '气氛需求', '收获人数', '识别确论',
+    # 中词(3 字)
+    '心中式', '带梦图', '牛仔库', '推广课', '加入段', '加密货币',
+    '石木床', '掀车', '摩特图', '演书服', '桌教店', '主视图',
+    '高科赞', '点击力', '空投产', '空点机',
+    # 短词(2 字)
+    '权占', '点几率', '汉堡国', '心客', '打笔', '放弹', '蒸柔',
+    '继程', '燃品', '主途', '复构', '解论', '内幕',
+    # 英文 / 特殊
+    '打爆',  # 同店语境
+    'AI助力',  # 缺空格
+    'GGC',  # ASR 把 GGV 听成 GGC
 ]
+# handoff B2 目标 ≥ 30 污染词;实际 44 条(v4.12 原 3 + asr_corrections.yaml 41)
+assert len(CORRUPTION_TOKENS) >= 30, f"期望 ≥ 30 条,实际 {len(CORRUPTION_TOKENS)}"
+
+
+# 段首/段末孤立词(M-11 衍生,NO-ORPHAN-WORDS 模式)
+# ASR 转录中常见的"好/对/那个/对吧/是吧"段首/段末填充词
+# 单独成段(段长 < 阈值) → 视为孤立,应被 Phase 1.7 LLM 删除
+ORPHAN_WORD_TOKENS = [
+    '好', '对', '那个', '对吧', '是吧', '嗯', '啊', '哦', '呢', '这个', '然后',
+]
+ORPHAN_PARAGRAPH_MAX_LEN = 20  # 孤立段长度阈值(纯孤立词 + 标点)
 
 
 # 表格检测正则
@@ -68,10 +98,15 @@ def find_tables(text: str) -> list[tuple[int, list[str]]]:
 
 
 def check_table_column_consistency(tables: list[tuple[int, list[str]]]) -> list[str]:
-    """检测表格列数不均匀。"""
+    """检测表格列数不均匀。
+
+    v4.21 B2 修正:列数算法 `line.count('|') - 1`(去除两侧边界 `|`),
+    原算法用 `line.count('|')` 多计 1 列,导致边界表格误判。
+    """
     issues: list[str] = []
     for start_line, table_lines in tables:
-        col_counts = [line.count('|') for line in table_lines]
+        # B2 修正:列数 = 总 `|` 数 - 1(两侧边界)
+        col_counts = [max(0, line.count('|') - 1) for line in table_lines]
         if not col_counts:
             continue
         most_common = max(set(col_counts), key=col_counts.count)
@@ -84,12 +119,60 @@ def check_table_column_consistency(tables: list[tuple[int, list[str]]]) -> list[
 
 
 def check_corruption_tokens(text: str) -> list[str]:
-    """检测已知污染词残留。"""
+    """检测已知污染词残留(41 条 CORRUPTION_TOKENS)。"""
     issues: list[str] = []
     for token in CORRUPTION_TOKENS:
         if token in text:
             issues.append(f"检测到污染词:{token!r}")
     return issues
+
+
+def check_no_orphan_words(text: str) -> list[str]:
+    """NO-ORPHAN-WORDS 模式(M-11 衍生,规约 26):段首/段末孤立无语义词组。
+
+    算法:按段落(连续非空行)切分,检查每段是否只由 ORPHAN_WORD_TOKENS + 标点组成
+    且段长 ≤ ORPHAN_PARAGRAPH_MAX_LEN(20 字符)。
+    命中 → 报告"孤立段",供 Phase 1.7 LLM 删除。
+    """
+    issues: list[str] = []
+    lines = text.splitlines()
+    para_start = 0
+    in_para = False
+    for i, line in enumerate(lines):
+        if line.strip():
+            if not in_para:
+                para_start = i
+                in_para = True
+        else:
+            if in_para:
+                # 段结束,检查
+                para_text = '\n'.join(lines[para_start:i]).strip()
+                _check_orphan_para(para_text, para_start + 1, issues)
+                in_para = False
+    # 文档末尾段
+    if in_para:
+        para_text = '\n'.join(lines[para_start:]).strip()
+        _check_orphan_para(para_text, para_start + 1, issues)
+    return issues
+
+
+def _check_orphan_para(para: str, line_no: int, issues: list[str]) -> None:
+    """检查单段是否孤立词段。"""
+    if len(para) > ORPHAN_PARAGRAPH_MAX_LEN:
+        return
+    # 去掉标点
+    cleaned = re.sub(r'[^\w\s]', '', para).strip()
+    if not cleaned:
+        return
+    # 检查是否只由孤立词 + 标点组成
+    words = cleaned.split()
+    if not words:
+        return
+    all_orphan = all(w in ORPHAN_WORD_TOKENS for w in words)
+    if all_orphan:
+        issues.append(
+            f"孤立段(line {line_no}):{para[:40]!r} 仅由段首/段末填充词组成"
+        )
 
 
 def check_broken_headings(text: str) -> list[str]:
@@ -154,6 +237,7 @@ def main() -> int:
     all_issues: list[str] = []
     all_issues.extend(check_table_column_consistency(tables))
     all_issues.extend(check_corruption_tokens(text))
+    all_issues.extend(check_no_orphan_words(text))
     all_issues.extend(check_broken_headings(text))
     if args.html and args.html.exists():
         html = read_file_safely(args.html)
