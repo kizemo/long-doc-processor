@@ -1,0 +1,19 @@
+{
+  "_comment": "post_pass_terms.py 使用的上下文安全替换规则。context 为空字符串时不限制上下文。from/to 为必填。",
+  "_schema": {
+    "rules": [
+      {
+        "from": "string",
+        "to": "string",
+        "context": "string (optional, ±50 字符窗口内必须出现的上下文关键词)"
+      }
+    ]
+  },
+  "rules": [
+    {"from": "AI助力", "to": "AI 助力", "context": ""},
+    {"from": "主图点击率低", "to": "主图点击率", "context": "优化"},
+    {"from": "心里", "to": "新客", "context": ""},
+    {"from": "心客", "to": "新客", "context": ""},
+    {"from": "打爆", "to": "打散", "context": "同店"}
+  ]
+}

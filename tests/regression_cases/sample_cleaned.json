@@ -1,0 +1,11 @@
+{
+  "name": "sample_cleaned (教学示例)",
+  "description": "v4.20 默认示例 cleaned.md 应满足的结构规约",
+  "input_md": "sample_cleaned.md",
+  "expected": {
+    "h2_count_min": 3,
+    "h3_count_min": 3,
+    "must_contain": ["## 1.", "## 2.", "## 7.", "总结与行动建议"],
+    "must_not_contain": ["讲师认为", "讲师指出", "学员搜索时", "好/对/那个"]
+  }
+}
