@@ -95,6 +95,55 @@ def make_verbose_status_callback(prefix: str = "llm"):
     return _on_status
 
 
+# D7 时间预算埋点(v4.21 D 阶段)----------------------------------
+
+import time
+from contextlib import contextmanager
+
+
+@contextmanager
+def time_budget(phase: str, budget: dict | None = None):
+    """D7 时间预算埋点 context manager。
+
+    用法:
+        budget = {}
+        with time_budget("phase_0", budget):
+            run_asr(...)
+        # budget = {"phase_0": 12.3}  # 秒
+
+    退出时自动 log 耗时到 stderr(用 log 函数,线程安全)。
+    可选 budget dict 累积所有 phase 耗时(供 D1 run_pipeline 输出总览)。
+    """
+    start = time.time()
+    try:
+        yield
+    finally:
+        elapsed = time.time() - start
+        if budget is not None:
+            budget[phase] = elapsed
+        log(f"[time] {phase}: {elapsed:.1f}s")
+
+
+def format_budget_summary(budget: dict[str, float]) -> str:
+    """格式化时间预算总览(D7 + D1 配合)。
+
+    Args:
+        budget: {phase_name: elapsed_seconds}
+
+    Returns:
+        多行字符串,每行一个 phase(按耗时降序)
+    """
+    if not budget:
+        return "(无 phase 记录)"
+    total = sum(budget.values())
+    lines = [f"[budget] 总耗时 {total:.1f}s"]
+    sorted_phases = sorted(budget.items(), key=lambda x: -x[1])
+    for phase, elapsed in sorted_phases:
+        pct = elapsed / total * 100 if total > 0 else 0
+        lines.append(f"  {phase:30s} {elapsed:7.1f}s ({pct:5.1f}%)")
+    return "\n".join(lines)
+
+
 def parse_frontmatter(content: str) -> Tuple[dict, str]:
     """解析 YAML frontmatter, 返回 (frontmatter_dict, 正文)
 
