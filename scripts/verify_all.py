@@ -663,6 +663,36 @@ def verify_no_doc_meta_header_blockquote(md_path: Path) -> RuleResult:
     return RuleResult(name='NO_DOC_META_HEADER_BLOCKQUOTE', passed=True)
 
 
+# v4.21 C3 阶段:--strict fail-loud 产物验证(整合 A4)
+
+def verify_purify_fail_loud(md_path: Path) -> RuleResult:
+    """PURIFY_FAIL_LOUD (v4.21 C3):strict 模式产物应含 ERROR 标记。
+
+    设计意图:A4 实现 --strict 模式后,LLM 失败的 chunk 在产物中
+    写 `> **ERROR**:LLM 净化失败(strict 模式)` 标记 + exit 2。
+    本规则验证产物中不应残留 ERROR 标记(若有,说明 LLM 部分仍失败)。
+
+    触发:产物含 `**ERROR**:LLM 净化失败` 或 `**ERROR**:LLM 失败`。
+    """
+    content = read_file_safely(md_path)
+    error_patterns = [
+        r'\*\*ERROR\*\*[::]\s*LLM 净化失败',
+        r'\*\*ERROR\*\*[::]\s*LLM 失败',
+    ]
+    found: list[str] = []
+    for pat in error_patterns:
+        for m in re.finditer(pat, content):
+            # 找到所在行
+            line_no = content[:m.start()].count('\n') + 1
+            found.append(f"line {line_no}: {m.group(0)[:60]!r}")
+    return RuleResult(
+        name='PURIFY_FAIL_LOUD',
+        passed=len(found) == 0,
+        message=f"{len(found)} 处 ERROR 标记(strict 模式残留)" if found else 'PASS',
+        details=found[:5],
+    )
+
+
 # 规则注册表 ----------------------------------------------------
 
 RULES: list[tuple[str, Callable]] = [
@@ -689,6 +719,8 @@ RULES: list[tuple[str, Callable]] = [
     ('IMG_SIZE_WITHIN_LIMIT', verify_img_size_within_limit),
     ('NO_PATH_TRAVERSAL', verify_no_path_traversal),
     ('NO_DOC_META_HEADER_BLOCKQUOTE', verify_no_doc_meta_header_blockquote),
+    # v4.21 C3 新增 1 项
+    ('PURIFY_FAIL_LOUD', verify_purify_fail_loud),
 ]
 
 

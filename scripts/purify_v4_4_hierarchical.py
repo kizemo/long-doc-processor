@@ -33,7 +33,7 @@ try:
     from scripts._llm_vision import call_vision, safe_llm_call
 except ImportError:
     from _llm_vision import call_vision, safe_llm_call  # type: ignore
-from utils import read_file_safely, write_file_safely, log  # noqa: E402
+from utils import read_file_safely, write_file_safely, log, make_verbose_status_callback  # noqa: E402
 
 
 # 配置 ------------------------------------------------------------
@@ -195,7 +195,7 @@ def split_into_chunks(md_text: str, skeleton_h2: list[str],
 
 # LLM 净化 ---------------------------------------------------------
 
-def purify_chunk(chunk: Chunk, model: str, total_chunks: int) -> str:
+def purify_chunk(chunk: Chunk, model: str, total_chunks: int, on_status=None) -> str:
     """调 LLM 对单个 chunk 做净化,带 retry 逻辑。
 
     Retry 触发:输出 H2 数 ≠ 1(LLM 经常违反"1 H2/chunk"规约)
@@ -210,7 +210,7 @@ def purify_chunk(chunk: Chunk, model: str, total_chunks: int) -> str:
 
     for attempt in range(1, 4):  # 最多 3 次(初 + 2 retry)
         chunk.retry_count = attempt
-        response, status = safe_llm_call(prompt, model=model)
+        response, status = safe_llm_call(prompt, model=model, on_status=on_status)
         if status != "ok":
             log(f"[purify] chunk {chunk.chunk_index} 第 {attempt} 次 LLM status={status}")
             response = ""
@@ -277,7 +277,8 @@ def purify_document(input_path: Path, output_path: Path,
                     workers: int = 3,
                     dry_run: bool = False,
                     max_chars: int = DEFAULT_MAX_CHARS,
-                    strict: bool = False) -> int:
+                    strict: bool = False,
+                    verbose: bool = False) -> int:
     """主入口:读 input → 切 chunk → 并发调 LLM → 写 cleaned.md。
 
     v4.21 增强(A4):
@@ -318,12 +319,15 @@ def purify_document(input_path: Path, output_path: Path,
             log(f"  [{c.chunk_index}] {len(c.raw_text)} chars, expected H2: {c.expected_h2_title[:40]}")
         return 0
 
+    # v4.21 C4:verbose 模式时,status 回调
+    on_status = make_verbose_status_callback("purify") if verbose else None
+
     # 并发调 LLM
     cleaned_chunks: list[str] = [''] * len(chunks)
     failed_chunks: list[int] = []  # 记录 LLM 全部失败的 chunk 索引
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_idx = {
-            executor.submit(purify_chunk, c, model, len(chunks)): i
+            executor.submit(purify_chunk, c, model, len(chunks), on_status): i
             for i, c in enumerate(chunks)
         }
         for future in as_completed(future_to_idx):
@@ -391,6 +395,8 @@ def main() -> int:
     parser.add_argument('--dry-run', action='store_true', help='只切分不调 LLM')
     parser.add_argument('--strict', action='store_true',
                         help='fail-loud:LLM 失败时写 ERROR 标记到输出 + exit 2(默认 fail-soft)')
+    parser.add_argument('--verbose', action='store_true',
+                        help='verbose 模式:LLM status 写到 stderr(v4.21 C4)')
     args = parser.parse_args()
 
     return purify_document(
@@ -402,6 +408,7 @@ def main() -> int:
         dry_run=args.dry_run,
         max_chars=args.max_chars,
         strict=args.strict,
+        verbose=args.verbose,
     )
 
 

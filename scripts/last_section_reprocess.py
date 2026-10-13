@@ -30,7 +30,7 @@ try:
     from scripts._llm_vision import call_vision, safe_llm_call
 except ImportError:
     from _llm_vision import call_vision, safe_llm_call  # type: ignore
-from utils import read_file_safely, write_file_safely, log  # noqa: E402
+from utils import read_file_safely, write_file_safely, log, make_verbose_status_callback  # noqa: E402
 
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
@@ -86,7 +86,8 @@ def split_tail(text: str, tail_ratio: float = TAIL_RATIO) -> str:
 
 def last_section_reprocess(input_path: Path, output_path: Path,
                             tail_ratio: float = TAIL_RATIO,
-                            model: str = DEFAULT_MODEL) -> int:
+                            model: str = DEFAULT_MODEL,
+                            verbose: bool = False) -> int:
     """主入口:读 cleaned → 切末段 → 调 LLM → 重组 + 写。"""
     if not input_path.exists():
         log(f"ERROR: 输入文件不存在:{input_path}")
@@ -98,7 +99,8 @@ def last_section_reprocess(input_path: Path, output_path: Path,
 
     # 调 LLM
     prompt = LAST_SECTION_PROMPT.format(last_section=tail)
-    response, status = safe_llm_call(prompt, model=model)
+    on_status = make_verbose_status_callback("last-section") if verbose else None
+    response, status = safe_llm_call(prompt, model=model, on_status=on_status)
     if status != "ok":
         log(f"[last-section] LLM status={status};fail-soft 保留原文")
         response = ""
@@ -157,11 +159,14 @@ def main() -> int:
     parser.add_argument('--tail', type=float, default=TAIL_RATIO,
                         help=f'末段比例(默认 {TAIL_RATIO})')
     parser.add_argument('--model', default=DEFAULT_MODEL, help='LLM 模型 ID')
+    parser.add_argument('--verbose', action='store_true',
+                        help='verbose 模式:LLM status 写到 stderr(v4.21 C4)')
     args = parser.parse_args()
 
     return last_section_reprocess(
         args.input, args.output,
         tail_ratio=args.tail, model=args.model,
+        verbose=args.verbose,
     )
 
 

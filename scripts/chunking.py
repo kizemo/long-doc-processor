@@ -19,6 +19,13 @@ _H2_RE = re.compile(r'^##\s+', re.MULTILINE)
 _H3_RE = re.compile(r'^###\s+', re.MULTILINE)
 
 
+# 单 chunk 字符上限(SKILL Gotcha:超出会让 LLM 自由发挥编造内容)
+# v4.21 C2 阶段:集中到 chunking.py,各脚本 import 此常量
+MAX_CHARS = 8000
+# 兼容别名(老代码可能 import 此名)
+DEFAULT_MAX_CHARS = MAX_CHARS
+
+
 @dataclass
 class H2Block:
     """一个 H2 章节的切片(与 _purify_smooth 兼容)。
@@ -73,7 +80,7 @@ def split_by_h2(text: str) -> tuple[str, list[H2Block]]:
 
 
 def split_oversized_h2(
-    block: H2Block, max_chars: int
+    block: H2Block, max_chars: int = MAX_CHARS
 ) -> list[H2Block]:
     """对超大 H2 块按 H3 切分(每个子块仍属同一 H2)。
 
@@ -82,7 +89,7 @@ def split_oversized_h2(
 
     Args:
         block: 单个 H2Block
-        max_chars: 单块字符上限(默认 8000)
+        max_chars: 单块字符上限(默认 8000 = MAX_CHARS)
 
     Returns:
         切分后的 H2Block 列表(若无需切分则返回 [block])
@@ -128,7 +135,10 @@ def split_oversized_h2(
 
 
 def _split_by_chars(block: H2Block, max_chars: int) -> list[H2Block]:
-    """兜底:按字符数强行切。"""
+    """兜底:按字符数强行切。
+
+    v4.21 C2 阶段:作为公共 helper 暴露在 chunking.py(原 _purify_smooth 内嵌)。
+    """
     text = block.raw_text
     chunks: list[H2Block] = []
     for i in range(0, len(text), max_chars):
@@ -141,9 +151,16 @@ def _split_by_chars(block: H2Block, max_chars: int) -> list[H2Block]:
     return chunks
 
 
+# v4.21 C2 兼容别名:旧代码 import 自 _purify_smooth
+# (_purify_smooth 中 re-export 这些)
+def _smooth_split_by_chars(block: H2Block, max_chars: int) -> list[H2Block]:
+    """_purify_smooth 兼容别名(老测试可能 import 此名)。"""
+    return _split_by_chars(block, max_chars)
+
+
 def chunk_for_llm(
     text: str,
-    max_chars: int = 8000,
+    max_chars: int = MAX_CHARS,
 ) -> tuple[str, list[H2Block]]:
     """组合 split_by_h2 + split_oversized_h2,直接产出 LLM-ready chunks。
 

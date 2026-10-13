@@ -34,7 +34,7 @@ try:
     from scripts._llm_vision import call_vision, safe_llm_call
 except ImportError:
     from _llm_vision import call_vision, safe_llm_call  # type: ignore
-from utils import read_file_safely, write_file_safely, log  # noqa: E402
+from utils import read_file_safely, write_file_safely, log, make_verbose_status_callback  # noqa: E402
 try:
     from scripts.chunking import chunk_for_llm  # noqa: E402
 except ImportError:
@@ -90,16 +90,17 @@ ROLE_PERSONA_PROMPT = """你是中文电商培训讲义文稿的"角色润色"�
 """
 
 
-def strip_block(content: str, model: str = DEFAULT_MODEL) -> str:
+def strip_block(content: str, model: str = DEFAULT_MODEL, on_status=None) -> str:
     """对单块做角色润色。LLM 失败时返回原内容(fail-soft)。
 
     v4.21 改用 safe_llm_call 统一 timeout/retry/status 分流。
+    v4.21 C4 阶段:on_status 回调(verbose 模式用)。
     """
     if not content.strip():
         return content
 
     prompt = ROLE_PERSONA_PROMPT.format(content=content)
-    response, status = safe_llm_call(prompt, model=model)
+    response, status = safe_llm_call(prompt, model=model, on_status=on_status)
 
     if status != "ok":
         log(f"[strip-persona] LLM status={status};降级保留原内容")
@@ -123,6 +124,7 @@ def strip_document(
     model: str = DEFAULT_MODEL,
     workers: int = 3,
     max_chars: int = DEFAULT_MAX_CHARS,
+    verbose: bool = False,
 ) -> int:
     """主入口(v4.21 改):读 input → chunk_by_h2 → 并发 LLM → 重组 → 写输出。"""
     if not input_path.exists():
@@ -138,10 +140,12 @@ def strip_document(
         log(f"[strip-persona] 无 H2,直接写原文 {output_path}")
         return 0
 
+    on_status = make_verbose_status_callback("strip-persona") if verbose else None
+
     cleaned_chunks: list[str] = [''] * len(chunks)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_idx = {
-            executor.submit(strip_block, c.raw_text, model): i
+            executor.submit(strip_block, c.raw_text, model, on_status): i
             for i, c in enumerate(chunks)
         }
         for future in as_completed(future_to_idx):
@@ -172,6 +176,8 @@ def main() -> int:
     parser.add_argument('--workers', type=int, default=3, help='并发 LLM 数')
     parser.add_argument('--max-chars', type=int, default=DEFAULT_MAX_CHARS,
                         help=f'单块字符上限(默认 {DEFAULT_MAX_CHARS},v4.21 A3 沉淀)')
+    parser.add_argument('--verbose', action='store_true',
+                        help='verbose 模式:LLM status 写到 stderr(v4.21 C4)')
     args = parser.parse_args()
 
     return strip_document(
@@ -179,6 +185,7 @@ def main() -> int:
         model=args.model,
         workers=args.workers,
         max_chars=args.max_chars,
+        verbose=args.verbose,
     )
 
 

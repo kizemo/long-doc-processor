@@ -75,6 +75,26 @@ def configure_stdout_utf8() -> None:
                 pass
 
 
+# safe_llm_call verbose status callback (v4.21 C4 沉淀) ----------
+
+def make_verbose_status_callback(prefix: str = "llm"):
+    """生成 safe_llm_call 的 on_status 回调(C4 阶段沉淀)。
+
+    用法:在 5 个 LLM 脚本的 --verbose flag 启用时,传给 safe_llm_call:
+        if args.verbose:
+            on_status = make_verbose_status_callback("[smooth]")
+        else:
+            on_status = None
+        response, status = safe_llm_call(prompt, on_status=on_status)
+
+    行为:把 safe_llm_call 的 status(ok / empty / error / timeout / rate_limited /
+    no_api_key / no_sdk) 写到 stderr,便于 debug 5 worker 并发时的状态分流。
+    """
+    def _on_status(s: str) -> None:
+        log(f"[{prefix}] {s}")
+    return _on_status
+
+
 def parse_frontmatter(content: str) -> Tuple[dict, str]:
     """解析 YAML frontmatter, 返回 (frontmatter_dict, 正文)
 
