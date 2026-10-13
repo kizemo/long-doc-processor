@@ -14,9 +14,37 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-# H2 / H3 / H1 标题正则
+# H1 / H2 / H3 / H4 / H5 标题正则(E3 集中,v4.21 E 阶段)
+# match 系列:仅匹配标题起始(matched at `## ` 等),用于判断"是否是某级标题"
+# with_title 系列:捕获标题文字,用于提取
+_H1_RE = re.compile(r'^#\s+', re.MULTILINE)
 _H2_RE = re.compile(r'^##\s+', re.MULTILINE)
 _H3_RE = re.compile(r'^###\s+', re.MULTILINE)
+_H4_RE = re.compile(r'^####\s+', re.MULTILINE)
+_H5_RE = re.compile(r'^#####\s+', re.MULTILINE)
+
+# 带标题文字捕获的版本(用于提取标题)
+_H1_TITLE_RE = re.compile(r'^#\s+(.+?)$', re.MULTILINE)
+_H2_TITLE_RE = re.compile(r'^##\s+(.+?)$', re.MULTILINE)
+_H3_TITLE_RE = re.compile(r'^###\s+(.+?)$', re.MULTILINE)
+_H4_TITLE_RE = re.compile(r'^####\s+(.+?)$', re.MULTILINE)
+_H5_TITLE_RE = re.compile(r'^#####\s+(.+?)$', re.MULTILINE)
+
+# 标题检测辅助
+HEADING_RE = {
+    1: _H1_RE,
+    2: _H2_RE,
+    3: _H3_RE,
+    4: _H4_RE,
+    5: _H5_RE,
+}
+HEADING_TITLE_RE = {
+    1: _H1_TITLE_RE,
+    2: _H2_TITLE_RE,
+    3: _H3_TITLE_RE,
+    4: _H4_TITLE_RE,
+    5: _H5_TITLE_RE,
+}
 
 
 # 单 chunk 字符上限(SKILL Gotcha:超出会让 LLM 自由发挥编造内容)

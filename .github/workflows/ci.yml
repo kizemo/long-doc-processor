@@ -1,0 +1,65 @@
+# GitHub Actions CI for long-doc-processor
+# v4.21 E 阶段:跨平台 pytest matrix
+# 跑 Python 3.12 在 3 个 OS 上,验证 long-doc-processor 跨平台兼容
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false  # 任一 OS 失败不阻塞其他
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.12']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          # 长 doc-processor 仅有 pytest 硬依赖(anthropic SDK 为可选)
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run pytest
+        run: |
+          python -m pytest tests/ -v --tb=short
+
+      - name: Verify CLI --help
+        run: |
+          # 验证 5 个 LLM 脚本 CLI --help 不破坏
+          python scripts/_llm_vision.py --help
+          python scripts/_purify_smooth.py --help
+          python scripts/purify_v4_4_hierarchical.py --help
+          python scripts/strip_lecturer_preamble.py --help
+          python scripts/strip_role_persona.py --help
+          python scripts/transcribe_via_crv.py --help
+          python scripts/run_pipeline.py --help
+          python scripts/preflight_check.py --help
+
+      - name: Verify no silent except
+        run: |
+          # 静默 except 应为 0 处
+          if grep -rn 'except.*pass\|except.*continue' scripts/; then
+            echo "❌ 发现静默 except"
+            exit 1
+          else
+            echo "✅ 静默 except: 0 处"
+          fi

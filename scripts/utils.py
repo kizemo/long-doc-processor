@@ -144,6 +144,238 @@ def format_budget_summary(budget: dict[str, float]) -> str:
     return "\n".join(lines)
 
 
+# E1 utils 扩充(v4.21 E 阶段)-----------------------------------
+
+def find_files_by_ext(root: Path, ext: str) -> list[Path]:
+    """递归找 root 下所有指定后缀的文件。
+
+    Args:
+        root: 搜索根目录
+        ext: 后缀名,含 `.`(如 `.md` / `.json` / `.py`)
+
+    Returns:
+        Path 列表(按字母序)
+    """
+    if not ext.startswith('.'):
+        ext = '.' + ext
+    return sorted(root.rglob(f'*{ext}'))
+
+
+def safe_rename(src: Path, dst: Path) -> bool:
+    """Windows 安全的 rename(处理 WinError 5 文件锁)。
+
+    策略:os.replace → 失败时 sleep 0.1s 重试 → 最终用 os.remove + os.rename(M-12 衍生)。
+
+    Args:
+        src: 源路径(必须存在)
+        dst: 目标路径(可存在或不存在)
+
+    Returns:
+        True 成功, False 失败
+    """
+    import os
+    import time as _t
+    if not src.exists():
+        return False
+    try:
+        os.replace(src, dst)
+        return True
+    except OSError:
+        _t.sleep(0.1)
+        try:
+            if dst.exists():
+                os.remove(dst)
+            os.rename(src, dst)
+            return True
+        except OSError:
+            return False
+
+
+def compute_md5(path: Path) -> str:
+    """计算文件 MD5 哈希(回归测试对比用)。"""
+    import hashlib
+    h = hashlib.md5()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(8192), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def atomic_write(path: Path, content: str) -> None:
+    """原子写:写临时文件 → rename,防中途崩溃损坏原文件。
+
+    Args:
+        path: 目标文件路径
+        content: 内容
+    """
+    import os
+    import tempfile
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=path.name + '.',
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        # 失败时清理临时文件
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def parse_table_row(line: str) -> list[str]:
+    """解析 markdown 表格行 `| a | b | c |` → ['a', 'b', 'c']。
+
+    算法:line.count('|') - 1(去除两侧边界 v4.21 B2 沉淀)+ strip + 过滤空字符串。
+    """
+    stripped = line.strip()
+    if not stripped.startswith('|') or not stripped.endswith('|'):
+        return []
+    # 去两侧边界 `|`
+    inner = stripped[1:-1]
+    # 按 | 切
+    cells = [c.strip() for c in inner.split('|')]
+    return cells
+
+
+def is_cjk(char: str) -> bool:
+    """判断单字符是否是 CJK 字符(基本汉字 + 扩展)。
+
+    Args:
+        char: 单字符字符串(长度必须为 1)
+
+    Returns:
+        True = CJK, False = 非 CJK
+    """
+    if len(char) != 1:
+        return False
+    cp = ord(char)
+    return (
+        '\u4e00' <= char <= '\u9fff'  # CJK 统一汉字
+        or '\u3400' <= char <= '\u4dbf'  # CJK 扩展 A
+        or '\uF900' <= char <= '\uFAFF'  # CJK 兼容
+    )
+
+
+def extract_first_h1(text: str) -> str | None:
+    """提取 markdown 第一个 H1 标题(verify_html 用)。
+
+    Args:
+        text: markdown 内容
+
+    Returns:
+        H1 文字(去 `# ` 前缀并 strip),无 H1 返回 None
+    """
+    for line in text.splitlines():
+        m = re.match(r'^#\s+(.+)$', line)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def normalize_whitespace(text: str) -> str:
+    """规范化空白(连续空格/tab 折叠为单空格,行尾空格去除,空行折叠为单行)。
+
+    用于回归测试字段比对(避免空格差异导致误判)。
+    """
+    lines = text.splitlines()
+    out_lines: list[str] = []
+    prev_blank = False
+    for line in lines:
+        # 折叠连续空格/tab 为单空格,strip 行尾
+        normalized = re.sub(r'[ \t]+', ' ', line).rstrip()
+        is_blank = (normalized == '')
+        if is_blank and prev_blank:
+            continue  # 跳过连续空行
+        out_lines.append(normalized)
+        prev_blank = is_blank
+    # 去掉末尾空行
+    while out_lines and out_lines[-1] == '':
+        out_lines.pop()
+    return '\n'.join(out_lines)
+
+
+# E2 argparse boilerplate 统一(v4.21 E 阶段)---------------------
+
+def make_standard_parser(
+    description: str,
+    *,
+    add_verbose: bool = True,
+    add_dry_run: bool = False,
+    add_workers: bool = False,
+) -> "argparse.ArgumentParser":
+    """生成统一的 argparse parser(E2 boilerplate 统一)。
+
+    自动注册:
+      - description
+      - --verbose flag(若 add_verbose=True,默认 True)
+      - --dry-run flag(若 add_dry_run=True,默认 False)
+      - --workers flag(若 add_workers=True,默认 3)
+
+    设计:
+      - 各脚本仍可自行添加其他 args
+      - 一致的 flag 命名减少学习成本
+      - C4 verbose status 通过 --verbose 启用
+
+    Usage:
+        parser = make_standard_parser("我的脚本", add_dry_run=True, add_workers=True)
+        parser.add_argument("input", help="...")
+        args = parser.parse_args()
+    """
+    import argparse
+    parser = argparse.ArgumentParser(
+        description=description,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    if add_verbose:
+        parser.add_argument(
+            '--verbose', action='store_true',
+            help='verbose 模式:LLM status 写到 stderr(v4.21 C4)',
+        )
+    if add_dry_run:
+        parser.add_argument(
+            '--dry-run', action='store_true',
+            help='dry-run 模式:不调 LLM/外部命令,只 mock',
+        )
+    if add_workers:
+        parser.add_argument(
+            '--workers', type=int, default=3,
+            help='并发 LLM 数(默认 3)',
+        )
+    return parser
+
+
+def safe_main(main_fn) -> int:
+    """统一 CLI 入口(E2 boilerplate 统一)。
+
+    替代 `if __name__ == "__main__": sys.exit(main())`,自动:
+      1. 调 configure_stdout_utf8(Windows UTF-8 兼容)
+      2. 调 main_fn()
+      3. 捕获 KeyboardInterrupt → exit 130
+      4. 异常未捕获 → exit 1 + log 异常
+
+    Usage:
+        def main() -> int: ...
+        if __name__ == "__main__":
+            sys.exit(safe_main(main))
+    """
+    configure_stdout_utf8()
+    try:
+        return main_fn()
+    except KeyboardInterrupt:
+        log("[main] 用户中断")
+        return 130
+    except SystemExit:
+        raise  # argparse 正常 exit 不捕获
+    except Exception as e:
+        log(f"[main] 未捕获异常:{type(e).__name__}: {e}")
+        return 1
+
+
 def parse_frontmatter(content: str) -> Tuple[dict, str]:
     """解析 YAML frontmatter, 返回 (frontmatter_dict, 正文)
 
