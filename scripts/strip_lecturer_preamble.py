@@ -33,7 +33,10 @@ try:
     from scripts._llm_vision import call_vision, safe_llm_call
 except ImportError:
     from _llm_vision import call_vision, safe_llm_call  # type: ignore
-from utils import read_file_safely, write_file_safely, log, make_verbose_status_callback  # noqa: E402
+from utils import (  # noqa: E402
+    read_file_safely, write_file_safely, log,
+    make_verbose_status_callback, make_standard_parser, safe_main,
+)
 try:
     from scripts.chunking import chunk_for_llm, H2Block  # noqa: E402
 except ImportError:
@@ -168,18 +171,16 @@ def strip_document(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description='NO-LECTURER-PREAMBLE 规约:清理讲师铺垫(LLM 改写,H2 chunked)',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    # v4.22 F4:用 make_standard_parser 统一 boilerplate
+    parser = make_standard_parser(
+        'NO-LECTURER-PREAMBLE 规约:清理讲师铺垫(LLM 改写,H2 chunked)',
+        add_workers=True,
     )
     parser.add_argument('input', type=Path, help='输入 md 路径')
     parser.add_argument('-o', '--output', type=Path, required=True, help='输出 md 路径')
     parser.add_argument('--model', default=DEFAULT_MODEL, help='LLM 模型 ID')
-    parser.add_argument('--workers', type=int, default=3, help='并发 LLM 数')
     parser.add_argument('--max-chars', type=int, default=DEFAULT_MAX_CHARS,
                         help=f'单块字符上限(默认 {DEFAULT_MAX_CHARS},v4.21 A3 沉淀)')
-    parser.add_argument('--verbose', action='store_true',
-                        help='verbose 模式:LLM status 写到 stderr(v4.21 C4)')
     args = parser.parse_args()
 
     return strip_document(
@@ -192,4 +193,4 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(safe_main(main))

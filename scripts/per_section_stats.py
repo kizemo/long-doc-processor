@@ -28,8 +28,8 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
-
-_H2_RE = re.compile(r'^##\s+(.+?)$', re.MULTILINE)
+# v4.22 F1:heading 正则统一从 chunking 导入
+from chunking import _H2_TITLE_RE as _H2_RE  # noqa: E402
 
 
 # 5 类资产关键词(粗匹配,实际 LLM 应做更精细判断)

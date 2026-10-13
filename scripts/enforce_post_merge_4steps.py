@@ -28,6 +28,7 @@ v4.9.1 总结与行动建议章节硬约束(SKILL.md):
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -46,10 +47,55 @@ POST_MERGE_4_STEPS = [
 ]
 
 
+def check_last_section_complete(md_path: Path, content: str) -> tuple[bool, str]:
+    """v4.22 F6 修复:实际验证 LAST_SECTION_COMPLETE(末段 H2 ≥2 H3 + 5 类资产)。
+
+    原 v4.21 实现用 `last_section_reprocess(rc==0)` 判,但 rc==0 只表示无异常,
+    跟"5 类资产齐全"无关 — 末段空表也可能 PASS。
+
+    v4.22 改为:
+      1. 抽末段 H2(最后 25% 区域的 H2)
+      2. 数 H3 子节(≥2 算 PASS)
+      3. 数 5 类资产(概念 / 案例 / 数据 / 逻辑 / 表格)出现次数
+    """
+    # 末段切分:从文本后 25% 开始找 H2
+    cut_offset = int(len(content) * 0.75)
+    tail_text = content[cut_offset:]
+    h2_match = re.search(r'^##\s+', tail_text, re.MULTILINE)
+    if not h2_match:
+        return False, "末段无 H2"
+    last_section = tail_text[h2_match.start():]
+
+    # 数 H3
+    h3_count = len(re.findall(r'^###\s+', last_section, re.MULTILINE))
+    if h3_count < 2:
+        return False, f"末段 H3 数 {h3_count} < 2"
+
+    # 5 类资产计数(每类 ≥1 算该类有)
+    asset_keywords = {
+        '概念': ['定义', '概念', '含义', '所谓', '是什么'],
+        '案例': ['案例', '店铺', '商家', '客户', '卖家'],
+        '数据': ['%', 'GMV', 'ROI', 'CTR', '数量', '数据', '指标'],
+        '逻辑': ['因为', '所以', '因此', '推理', '因果', '导致'],
+        '表格': ['| ---', '|---', '| 列', '| 标签', '| 步骤'],
+    }
+    asset_counts = {
+        name: sum(1 for kw in kws if kw in last_section)
+        for name, kws in asset_keywords.items()
+    }
+    asset_present = sum(1 for c in asset_counts.values() if c > 0)
+    if asset_present < 5:
+        missing = [n for n, c in asset_counts.items() if c == 0]
+        return False, f"5 类资产仅 {asset_present} 类:{missing} 缺失"
+
+    return True, f"末段 H3={h3_count},5 类资产齐全"
+
+
 def run_4_steps(md_path: Path) -> tuple[bool, list[tuple[str, bool, str]]]:
     """跑 4 步验证,返回 (all_pass, [(step_name, passed, message), ...])。
 
-    复用 verify_all 的 4 个函数,避免重复实现。
+    复用 verify_all 的 3 个函数 + 自带 LAST_SECTION_COMPLETE 直接验证。
+    v4.22 F2:content 缓存,4 步只读 1 次磁盘。
     """
     try:
         from scripts.verify_all import (
@@ -57,61 +103,66 @@ def run_4_steps(md_path: Path) -> tuple[bool, list[tuple[str, bool, str]]]:
             verify_no_doc_meta_header,
             verify_no_role_persona_extended,
         )
-        from scripts.last_section_reprocess import last_section_reprocess
     except ImportError:
-        # 兜底
         from verify_all import (  # type: ignore
             verify_hierarchical_numbering,
             verify_no_doc_meta_header,
             verify_no_role_persona_extended,
         )
-        from last_section_reprocess import last_section_reprocess  # type: ignore
 
-    results: list[tuple[str, bool, str]] = []
-
-    # 1. LAST_SECTION_COMPLETE:简化为 last_section_reprocess 能成功处理
+    # F2:预读 content + monkey-patch read_file_safely 缓存
     try:
-        with __import__("tempfile").NamedTemporaryFile(
-            mode='w', suffix='.md', delete=False, encoding='utf-8'
-        ) as f:
-            f.write(md_path.read_text(encoding="utf-8"))
-            tmp_path = Path(f.name)
+        import scripts.utils as _utils
+    except ImportError:
+        import utils as _utils  # type: ignore
+    _original_read = _utils.read_file_safely
+    _content_cache: dict[str, str] = {}
+    _content_cache[str(md_path)] = _original_read(md_path)
+
+    def _cached_read(path):
+        key = str(path)
+        if key not in _content_cache:
+            _content_cache[key] = _original_read(path)
+        return _content_cache[key]
+
+    _utils.read_file_safely = _cached_read
+    content = _content_cache[str(md_path)]
+
+    try:
+        results: list[tuple[str, bool, str]] = []
+
+        # 1. LAST_SECTION_COMPLETE(F6 修复:直接验证 5 类资产)
         try:
-            tmp_out = tmp_path.with_suffix('.out.md')
-            rc = last_section_reprocess(tmp_path, tmp_out, tail_ratio=0.25)
-            # 成功处理(不报错)即视为通过
-            passed = (rc == 0)
-            msg = "末段可被 last_section_reprocess 处理" if passed else f"rc={rc}"
+            passed, msg = check_last_section_complete(md_path, content)
             results.append(("LAST_SECTION_COMPLETE", passed, msg))
-        finally:
-            tmp_path.unlink(missing_ok=True)
-            tmp_path.with_suffix('.out.md').unlink(missing_ok=True)
-    except Exception as e:
-        results.append(("LAST_SECTION_COMPLETE", False, f"EXCEPTION: {type(e).__name__}: {e}"))
+        except Exception as e:
+            results.append(("LAST_SECTION_COMPLETE", False, f"EXCEPTION: {type(e).__name__}: {e}"))
 
-    # 2. HIERARCHICAL_NUMBERING
-    try:
-        r = verify_hierarchical_numbering(md_path)
-        results.append(("HIERARCHICAL_NUMBERING", r.passed, r.message))
-    except Exception as e:
-        results.append(("HIERARCHICAL_NUMBERING", False, f"EXCEPTION: {type(e).__name__}: {e}"))
+        # 2. HIERARCHICAL_NUMBERING
+        try:
+            r = verify_hierarchical_numbering(md_path)
+            results.append(("HIERARCHICAL_NUMBERING", r.passed, r.message))
+        except Exception as e:
+            results.append(("HIERARCHICAL_NUMBERING", False, f"EXCEPTION: {type(e).__name__}: {e}"))
 
-    # 3. NO_ROLE_PERSONA_EXTENDED
-    try:
-        r = verify_no_role_persona_extended(md_path)
-        results.append(("NO_ROLE_PERSONA_EXTENDED", r.passed, r.message))
-    except Exception as e:
-        results.append(("NO_ROLE_PERSONA_EXTENDED", False, f"EXCEPTION: {type(e).__name__}: {e}"))
+        # 3. NO_ROLE_PERSONA_EXTENDED
+        try:
+            r = verify_no_role_persona_extended(md_path)
+            results.append(("NO_ROLE_PERSONA_EXTENDED", r.passed, r.message))
+        except Exception as e:
+            results.append(("NO_ROLE_PERSONA_EXTENDED", False, f"EXCEPTION: {type(e).__name__}: {e}"))
 
-    # 4. NO_DOC_META_HEADER
-    try:
-        r = verify_no_doc_meta_header(md_path)
-        results.append(("NO_DOC_META_HEADER", r.passed, r.message))
-    except Exception as e:
-        results.append(("NO_DOC_META_HEADER", False, f"EXCEPTION: {type(e).__name__}: {e}"))
+        # 4. NO_DOC_META_HEADER
+        try:
+            r = verify_no_doc_meta_header(md_path)
+            results.append(("NO_DOC_META_HEADER", r.passed, r.message))
+        except Exception as e:
+            results.append(("NO_DOC_META_HEADER", False, f"EXCEPTION: {type(e).__name__}: {e}"))
 
-    all_pass = all(r[1] for r in results)
-    return all_pass, results
+        all_pass = all(r[1] for r in results)
+        return all_pass, results
+    finally:
+        _utils.read_file_safely = _original_read
 
 
 def main() -> int:

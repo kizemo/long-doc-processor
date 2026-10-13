@@ -22,10 +22,8 @@ sys.path.insert(0, str(__file__.replace("\\", "/").rsplit("/", 2)[0]))
 import scripts.utils as u
 from scripts.utils import (
     find_files_by_ext,
-    safe_rename,
     compute_md5,
     atomic_write,
-    parse_table_row,
     is_cjk,
     extract_first_h1,
     normalize_whitespace,
@@ -67,33 +65,9 @@ class TestFindFilesByExt(unittest.TestCase):
 # 2. safe_rename
 
 class TestSafeRename(unittest.TestCase):
-    def test_basic_rename(self):
-        """src → dst 正常 rename。"""
-        with tempfile.TemporaryDirectory() as tmp:
-            src = Path(tmp) / "src.md"
-            dst = Path(tmp) / "dst.md"
-            src.write_text("hello")
-            self.assertTrue(safe_rename(src, dst))
-            self.assertFalse(src.exists())
-            self.assertTrue(dst.exists())
-            self.assertEqual(dst.read_text(), "hello")
-
-    def test_overwrite_existing(self):
-        """dst 已存在 → 覆盖。"""
-        with tempfile.TemporaryDirectory() as tmp:
-            src = Path(tmp) / "src.md"
-            dst = Path(tmp) / "dst.md"
-            src.write_text("new")
-            dst.write_text("old")
-            self.assertTrue(safe_rename(src, dst))
-            self.assertEqual(dst.read_text(), "new")
-
-    def test_nonexistent_src(self):
-        """src 不存在 → False。"""
-        with tempfile.TemporaryDirectory() as tmp:
-            src = Path(tmp) / "nonexistent.md"
-            dst = Path(tmp) / "dst.md"
-            self.assertFalse(safe_rename(src, dst))
+    def test_safe_rename_removed(self):
+        """v4.22 F5:safe_rename 已删(0 生产调用),此为占位 test。"""
+        self.assertFalse(hasattr(u, "safe_rename"))
 
 
 # 3. compute_md5
@@ -143,25 +117,11 @@ class TestAtomicWrite(unittest.TestCase):
             self.assertEqual(p.read_text(encoding="utf-8"), "nested")
 
 
-# 5. parse_table_row
+# 5. parse_table_row — 已删(F5),保留 0-test 占位
 
 class TestParseTableRow(unittest.TestCase):
-    def test_basic_row(self):
-        self.assertEqual(parse_table_row("| a | b | c |"), ["a", "b", "c"])
-
-    def test_cjk_row(self):
-        self.assertEqual(parse_table_row("| 标签 | 权重 | 数量 |"), ["标签", "权重", "数量"])
-
-    def test_empty_cells(self):
-        self.assertEqual(parse_table_row("| | | |"), ["", "", ""])
-
-    def test_not_a_table_row(self):
-        """不以 | 开头 → 返回空 list。"""
-        self.assertEqual(parse_table_row("not a table"), [])
-
-    def test_separator_row(self):
-        """|---|---| → 解析为 ['---', '---']。"""
-        self.assertEqual(parse_table_row("|---|---|"), ["---", "---"])
+    def test_parse_table_row_removed(self):
+        self.assertFalse(hasattr(u, "parse_table_row"))
 
 
 # 6. is_cjk

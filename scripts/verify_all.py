@@ -42,16 +42,16 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils import read_file_safely, parse_frontmatter, check_links, get_base_dir, log  # noqa: E402
+from utils import read_file_safely, parse_frontmatter, check_links, get_base_dir, log, find_files_by_ext  # noqa: E402
 
 import yaml
 
-
-# 标题正则
-_H2_RE = re.compile(r'^##\s+(.+?)$', re.MULTILINE)
-_H3_RE = re.compile(r'^###\s+(.+?)$', re.MULTILINE)
-_H4_RE = re.compile(r'^####\s+(.+?)$', re.MULTILINE)
-_H5_RE = re.compile(r'^#####\s+(.+?)$', re.MULTILINE)
+# 标题正则(v4.22 F1:统一从 chunking 导入,消除 8 脚本重复定义)
+from chunking import _H2_TITLE_RE, _H3_TITLE_RE, _H4_TITLE_RE, _H5_TITLE_RE  # noqa: E402
+_H2_RE = _H2_TITLE_RE
+_H3_RE = _H3_TITLE_RE
+_H4_RE = _H4_TITLE_RE
+_H5_RE = _H5_TITLE_RE
 
 
 @dataclass
@@ -725,20 +725,42 @@ RULES: list[tuple[str, Callable]] = [
 
 
 def verify_file(md_path: Path) -> list[RuleResult]:
-    """对单个文件跑全部规则,返回 RuleResult 列表。"""
-    results: list[RuleResult] = []
-    for name, rule_fn in RULES:
-        try:
-            result = rule_fn(md_path)
-        except Exception as e:
-            result = RuleResult(name=name, passed=False, message=f'EXCEPTION: {e}')
-        results.append(result)
-    return results
+    """对单个文件跑全部规则,返回 RuleResult 列表。
+
+    v4.22 F2:content 缓存,21 条规则只读 1 次磁盘(原 21 次)。
+    通过 monkey-patch utils.read_file_safely 实现 verify_file 范围内缓存。
+    """
+    # 进入 verify_file:预读 + 替换 read_file_safely 为 cached 版本
+    import scripts.utils as _utils
+    _original_read = _utils.read_file_safely
+    _content_cache: dict[str, str] = {}
+    _cache_key = str(md_path)
+
+    def _cached_read(path):
+        key = str(path)
+        if key in _content_cache:
+            return _content_cache[key]
+        content = _original_read(path)
+        _content_cache[key] = content
+        return content
+
+    _utils.read_file_safely = _cached_read
+    try:
+        results: list[RuleResult] = []
+        for name, rule_fn in RULES:
+            try:
+                result = rule_fn(md_path)
+            except Exception as e:
+                result = RuleResult(name=name, passed=False, message=f'EXCEPTION: {e}')
+            results.append(result)
+        return results
+    finally:
+        _utils.read_file_safely = _original_read
 
 
 def main() -> int:
     base = get_base_dir()
-    md_files = sorted(base.rglob('*.md'))
+    md_files = find_files_by_ext(base, '.md')
     print(f"=== 全量验证 {len(md_files)} 个 md 文件 ({len(RULES)} 条规则) ===\n")
 
     fm_pass = 0

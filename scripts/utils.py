@@ -161,36 +161,6 @@ def find_files_by_ext(root: Path, ext: str) -> list[Path]:
     return sorted(root.rglob(f'*{ext}'))
 
 
-def safe_rename(src: Path, dst: Path) -> bool:
-    """Windows 安全的 rename(处理 WinError 5 文件锁)。
-
-    策略:os.replace → 失败时 sleep 0.1s 重试 → 最终用 os.remove + os.rename(M-12 衍生)。
-
-    Args:
-        src: 源路径(必须存在)
-        dst: 目标路径(可存在或不存在)
-
-    Returns:
-        True 成功, False 失败
-    """
-    import os
-    import time as _t
-    if not src.exists():
-        return False
-    try:
-        os.replace(src, dst)
-        return True
-    except OSError:
-        _t.sleep(0.1)
-        try:
-            if dst.exists():
-                os.remove(dst)
-            os.rename(src, dst)
-            return True
-        except OSError:
-            return False
-
-
 def compute_md5(path: Path) -> str:
     """计算文件 MD5 哈希(回归测试对比用)。"""
     import hashlib
@@ -225,21 +195,6 @@ def atomic_write(path: Path, content: str) -> None:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
         raise
-
-
-def parse_table_row(line: str) -> list[str]:
-    """解析 markdown 表格行 `| a | b | c |` → ['a', 'b', 'c']。
-
-    算法:line.count('|') - 1(去除两侧边界 v4.21 B2 沉淀)+ strip + 过滤空字符串。
-    """
-    stripped = line.strip()
-    if not stripped.startswith('|') or not stripped.endswith('|'):
-        return []
-    # 去两侧边界 `|`
-    inner = stripped[1:-1]
-    # 按 | 切
-    cells = [c.strip() for c in inner.split('|')]
-    return cells
 
 
 def is_cjk(char: str) -> bool:

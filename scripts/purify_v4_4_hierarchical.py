@@ -33,7 +33,10 @@ try:
     from scripts._llm_vision import call_vision, safe_llm_call
 except ImportError:
     from _llm_vision import call_vision, safe_llm_call  # type: ignore
-from utils import read_file_safely, write_file_safely, log, make_verbose_status_callback  # noqa: E402
+from utils import (  # noqa: E402
+    read_file_safely, write_file_safely, log,
+    make_verbose_status_callback, make_standard_parser, safe_main,
+)
 
 
 # 配置 ------------------------------------------------------------
@@ -97,9 +100,10 @@ class Chunk:
 
 
 # 骨架提取 + chunk 切分 ----------------------------------------------
-
-_H2_RE = re.compile(r'^##\s+(.+?)$', re.MULTILINE)
-_H1_RE = re.compile(r'^#\s+(.+?)$', re.MULTILINE)
+# v4.22 F1:heading 正则统一从 chunking 导入(消除 8 脚本重复定义)
+from chunking import _H1_TITLE_RE, _H2_TITLE_RE  # noqa: E402
+_H1_RE = _H1_TITLE_RE
+_H2_RE = _H2_TITLE_RE
 
 
 def extract_h2_titles(md_text: str) -> list[str]:
@@ -200,6 +204,9 @@ def purify_chunk(chunk: Chunk, model: str, total_chunks: int, on_status=None) ->
 
     Retry 触发:输出 H2 数 ≠ 1(LLM 经常违反"1 H2/chunk"规约)
     重试 prompt 加强:加 "⚠️ 第 N 次调用:必须只输出 1 个 H2,标题文字 = {skeleton_h2}"
+
+    v4.22 F3:safe_llm_call(max_retries=1),由 purify_chunk 外层循环统一驱动 retry。
+    原 v4.21:外层 3 次 × safe_llm_call(max_retries=3) = 最多 9 次 LLM 调用(token 浪费)。
     """
     prompt = PURIFY_CHUNK_PROMPT_TEMPLATE.format(
         skeleton_h2=chunk.expected_h2_title,
@@ -210,7 +217,11 @@ def purify_chunk(chunk: Chunk, model: str, total_chunks: int, on_status=None) ->
 
     for attempt in range(1, 4):  # 最多 3 次(初 + 2 retry)
         chunk.retry_count = attempt
-        response, status = safe_llm_call(prompt, model=model, on_status=on_status)
+        # F3:max_retries=1(让外层循环统一驱动,避免双层 retry)
+        response, status = safe_llm_call(
+            prompt, model=model, on_status=on_status,
+            max_retries=1,
+        )
         if status != "ok":
             log(f"[purify] chunk {chunk.chunk_index} 第 {attempt} 次 LLM status={status}")
             response = ""
@@ -379,9 +390,11 @@ def purify_document(input_path: Path, output_path: Path,
 # CLI -------------------------------------------------------------
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description='v4.4 hierarchical 净化(8 chunk + LLM + 骨架对齐 + retry + v4.21 MAX_CHARS + --strict)',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    # v4.22 F4:用 make_standard_parser 统一 boilerplate(verbose/dry-run/workers)
+    parser = make_standard_parser(
+        'v4.4 hierarchical 净化(8 chunk + LLM + 骨架对齐 + retry + v4.21 MAX_CHARS + --strict)',
+        add_dry_run=True,
+        add_workers=True,
     )
     parser.add_argument('input', type=Path, help='输入 raw/transcript md 路径')
     parser.add_argument('-o', '--output', type=Path, required=True, help='输出 cleaned.md 路径')
@@ -390,13 +403,9 @@ def main() -> int:
                         help=f'目标 chunk 数(默认 {DEFAULT_N_CHUNKS})')
     parser.add_argument('--max-chars', type=int, default=DEFAULT_MAX_CHARS,
                         help=f'单 chunk 字符上限(默认 {DEFAULT_MAX_CHARS},超 raise)')
-    parser.add_argument('--workers', type=int, default=3, help='并发 LLM 数')
     parser.add_argument('--model', default=DEFAULT_MODEL, help='LLM 模型 ID')
-    parser.add_argument('--dry-run', action='store_true', help='只切分不调 LLM')
     parser.add_argument('--strict', action='store_true',
                         help='fail-loud:LLM 失败时写 ERROR 标记到输出 + exit 2(默认 fail-soft)')
-    parser.add_argument('--verbose', action='store_true',
-                        help='verbose 模式:LLM status 写到 stderr(v4.21 C4)')
     args = parser.parse_args()
 
     return purify_document(
@@ -413,4 +422,4 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(safe_main(main))

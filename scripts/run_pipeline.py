@@ -65,6 +65,12 @@ PHASES = [
 PIPELINE_STATE_FILE = "pipeline_state.json"
 
 
+# v4.22 F7:区分 stub 阶段(待实现)与真实 phase 错误
+class PipelineStubError(NotImplementedError):
+    """Stub 阶段抛此异常,提示用户该 phase 尚未实现真实模式(只 dry-run)。"""
+    pass
+
+
 def load_config(path: Path) -> dict:
     """读 pipeline_config.json(由 --init 生成或 preflight_check 写)。"""
     if not path.exists():
@@ -122,9 +128,9 @@ def run_phase_0_asr(input_path: Path, output_dir: Path, dry_run: bool, budget: d
             log(f"[run-pipeline] phase_0_asr (dry-run): wrote {output}")
             return str(output)
         else:
-            # 真实 ASR:调 transcribe_via_crv.py
+            # 真实 ASR:调 transcribe_via_crv.py(v4.22 F7:用 PipelineStubError 区分)
             log("[run-pipeline] phase_0_asr: 真实 ASR(此处未实现,需 --dry-run)")
-            raise NotImplementedError("真实 ASR 需独立会话调用 transcribe_via_crv.py")
+            raise PipelineStubError("phase_0_asr 真实模式未实现,请用 --dry-run 或先单独跑 transcribe_via_crv.py")
 
 
 def run_phase_1_purify(
@@ -144,7 +150,7 @@ def run_phase_1_purify(
             return str(output)
         else:
             log("[run-pipeline] phase_1_purify: 真实净化(此处未实现,需 --dry-run)")
-            raise NotImplementedError("真实净化需独立会话调用 purify_v4_4_hierarchical.py")
+            raise PipelineStubError("phase_1_purify 真实模式未实现,请用 --dry-run 或先单独跑 purify_v4_4_hierarchical.py")
 
 
 def run_verify_all(input_md: Path, dry_run: bool, budget: dict) -> int:
@@ -250,6 +256,11 @@ def main() -> int:
             out = run_phase_0_asr(args.input, output_dir, args.dry_run, budget)
             mark_done(state, "phase_0_asr", out)
             save_state(args.config.parent / PIPELINE_STATE_FILE, state)
+        except PipelineStubError as e:
+            # v4.22 F7:stub 阶段(待实现),明确提示用户
+            log(f"[run-pipeline] ⚠️ STUB: {e}")
+            log("[run-pipeline] 提示:先单独跑该 phase 的脚本(如 transcribe_via_crv.py),或用 --dry-run")
+            return 4
         except NotImplementedError as e:
             log(f"[run-pipeline] FAIL: {e}")
             return 3

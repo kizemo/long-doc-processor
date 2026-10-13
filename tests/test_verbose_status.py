@@ -62,7 +62,7 @@ class TestVerboseStatusCallback(unittest.TestCase):
 # 2. CLI --verbose flag 注册 --------------------------------------
 
 class TestVerboseCliRegistration(unittest.TestCase):
-    """5 个 LLM 脚本 CLI 都有 --verbose flag。"""
+    """5 个 LLM 脚本 CLI 都有 --verbose flag(v4.22 F4:通过 make_standard_parser)。"""
 
     SCRIPTS = [
         "scripts/_purify_smooth.py",
@@ -73,12 +73,14 @@ class TestVerboseCliRegistration(unittest.TestCase):
     ]
 
     def test_all_5_scripts_have_verbose_flag(self):
-        """5 个 LLM 脚本源码均含 --verbose。"""
+        """5 个 LLM 脚本源码通过 make_standard_parser 注入 --verbose。"""
         for script in self.SCRIPTS:
             path = Path(script)
             self.assertTrue(path.exists(), f"{script} 不存在")
             src = path.read_text(encoding="utf-8")
-            self.assertIn("--verbose", src, f"{script} 缺 --verbose flag")
+            # v4.22 F4:--verbose 由 make_standard_parser 注入(而非手写)
+            self.assertIn("make_standard_parser(", src,
+                          f"{script} 缺 make_standard_parser 工厂")
             self.assertIn("make_verbose_status_callback", src,
                           f"{script} 缺 verbose status callback")
 

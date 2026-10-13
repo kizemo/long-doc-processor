@@ -42,8 +42,10 @@ from utils import read_file_safely, log  # noqa: E402
 DEFAULT_CASES_DIR = Path(__file__).resolve().parent.parent / 'tests' / 'regression_cases'
 
 
-_H2_RE = re.compile(r'^##\s+', re.MULTILINE)
-_H3_RE = re.compile(r'^###\s+', re.MULTILINE)
+# v4.22 F1:heading 正则统一从 chunking 导入(match-only 模式)
+from chunking import HEADING_RE  # noqa: E402
+_H2_RE = HEADING_RE[2]
+_H3_RE = HEADING_RE[3]
 
 
 def count_cjk(text: str) -> int:

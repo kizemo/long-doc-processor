@@ -41,10 +41,11 @@ H4_PER_H3_MAX = 3  # v4.4 H4-PER-H3-MAX
 H4_TOTAL_MAX = 50  # v4.4 H4-TOTAL-MAX
 
 
-# 标题正则
-_H2_RE = re.compile(r'^##\s+(.+?)$', re.MULTILINE)
-_H3_RE = re.compile(r'^###\s+(.+?)$', re.MULTILINE)
-_H4_RE = re.compile(r'^####\s+(.+?)$', re.MULTILINE)
+# v4.22 F1:heading 正则统一从 chunking 导入(with-title 模式)
+from chunking import _H2_TITLE_RE, _H3_TITLE_RE, _H4_TITLE_RE  # noqa: E402
+_H2_RE = _H2_TITLE_RE
+_H3_RE = _H3_TITLE_RE
+_H4_RE = _H4_TITLE_RE
 
 # 编号匹配:`1` / `1.` / `1.1` / `1.1.1` / `1.1.1.` 全部接受,后接空格 + 标题
 _NUMBERING_PREFIX = re.compile(r'^(\d+(?:\.\d+)*)\.?\s+(.+?)$')

@@ -37,7 +37,10 @@ try:
 except ImportError:
     # 兜底:直接 import(脚本与 _llm_vision.py 同目录)
     from _llm_vision import call_vision, safe_llm_call  # noqa: E402
-from utils import read_file_safely, write_file_safely, log, make_verbose_status_callback  # noqa: E402
+from utils import (  # noqa: E402
+    read_file_safely, write_file_safely, log,
+    make_verbose_status_callback, make_standard_parser, safe_main,
+)
 
 # v4.21 C2 阶段:切分逻辑统一从 chunking.py 导入(消除重复定义)
 try:
@@ -265,20 +268,18 @@ def smooth_document(input_path: Path, output_path: Path,
 # CLI -------------------------------------------------------------
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description='v4.16 通顺化重写(per H2 独立 LLM)',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    # v4.22 F4:用 make_standard_parser 统一 boilerplate
+    parser = make_standard_parser(
+        'v4.16 通顺化重写(per H2 独立 LLM)',
+        add_dry_run=True,
+        add_workers=True,
     )
     parser.add_argument('input', help='输入 cleaned.md 路径')
     parser.add_argument('-o', '--output', required=True, type=Path,
                         help='输出 smoothed.md 路径')
     parser.add_argument('--model', default=DEFAULT_MODEL, help='LLM 模型 ID')
-    parser.add_argument('--workers', type=int, default=3, help='并发 LLM 调用数')
     parser.add_argument('--max-chars', type=int, default=MAX_CHUNK_CHARS,
                         help=f'单块字符上限(默认 {MAX_CHUNK_CHARS},SKILL Gotcha)')
-    parser.add_argument('--dry-run', action='store_true', help='只输出切分信息,不调 LLM')
-    parser.add_argument('--verbose', action='store_true',
-                        help='verbose 模式:LLM status 写到 stderr(v4.21 C4)')
     args = parser.parse_args()
 
     input_path = Path(args.input).resolve()
@@ -297,4 +298,4 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(safe_main(main))

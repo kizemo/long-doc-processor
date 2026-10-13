@@ -29,8 +29,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 
-_H2_RE = re.compile(r'^##\s+(.+?)$', re.MULTILINE)
-_H3_RE = re.compile(r'^###\s+(.+?)$', re.MULTILINE)
+# v4.22 F1:heading 正则统一从 chunking 导入(with-title 模式)
+from chunking import _H2_TITLE_RE, _H3_TITLE_RE  # noqa: E402
+_H2_RE = _H2_TITLE_RE
+_H3_RE = _H3_TITLE_RE
+# _H3_NUM_RE 是特定 pattern(捕获 H3 编号数字),保留本地
 _H3_NUM_RE = re.compile(r'^###\s+(\d+)\.(\d+)\s+', re.MULTILINE)
 
 

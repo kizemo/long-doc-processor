@@ -30,7 +30,10 @@ try:
     from scripts._llm_vision import call_vision, safe_llm_call
 except ImportError:
     from _llm_vision import call_vision, safe_llm_call  # type: ignore
-from utils import read_file_safely, write_file_safely, log, make_verbose_status_callback  # noqa: E402
+from utils import (  # noqa: E402
+    read_file_safely, write_file_safely, log,
+    make_verbose_status_callback, make_standard_parser, safe_main,
+)
 
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
@@ -150,17 +153,15 @@ def _strip_md_wrapper(text: str) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description='LAST-SECTION-COMPLETE 规约:末段独立修复(LLM)',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    # v4.22 F4:用 make_standard_parser 统一 boilerplate
+    parser = make_standard_parser(
+        'LAST-SECTION-COMPLETE 规约:末段独立修复(LLM)',
     )
     parser.add_argument('input', type=Path, help='cleaned.md 路径')
     parser.add_argument('-o', '--output', type=Path, required=True, help='输出 md 路径')
     parser.add_argument('--tail', type=float, default=TAIL_RATIO,
                         help=f'末段比例(默认 {TAIL_RATIO})')
     parser.add_argument('--model', default=DEFAULT_MODEL, help='LLM 模型 ID')
-    parser.add_argument('--verbose', action='store_true',
-                        help='verbose 模式:LLM status 写到 stderr(v4.21 C4)')
     args = parser.parse_args()
 
     return last_section_reprocess(
@@ -171,4 +172,4 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(safe_main(main))

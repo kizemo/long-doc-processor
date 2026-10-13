@@ -51,6 +51,7 @@ def _call_vision_or_raise(
     Raises:
         RuntimeError: SDK 未装 / API key 缺失 / LLM 异常
     """
+    # v4.22 F7:延迟 import,避免模块顶部缓存干扰 monkey-patch
     try:
         from anthropic import Anthropic
     except ImportError as e:
