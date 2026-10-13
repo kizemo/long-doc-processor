@@ -27,9 +27,9 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
-    from scripts._llm_vision import call_vision
+    from scripts._llm_vision import call_vision, safe_llm_call
 except ImportError:
-    from _llm_vision import call_vision  # type: ignore
+    from _llm_vision import call_vision, safe_llm_call  # type: ignore
 from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 
@@ -98,10 +98,9 @@ def last_section_reprocess(input_path: Path, output_path: Path,
 
     # 调 LLM
     prompt = LAST_SECTION_PROMPT.format(last_section=tail)
-    try:
-        response = call_vision(prompt, [], model=model)
-    except Exception as e:
-        log(f"[last-section] LLM 异常:{e};fail-soft 保留原文")
+    response, status = safe_llm_call(prompt, model=model)
+    if status != "ok":
+        log(f"[last-section] LLM status={status};fail-soft 保留原文")
         response = ""
 
     if response and response.strip():

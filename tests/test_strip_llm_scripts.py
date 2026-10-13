@@ -40,15 +40,15 @@ def _mock_llm_with_input(prefix: str, suffix: str):
 class TestStripLecturerPreamble(unittest.TestCase):
 
     def test_strip_block_returns_cleaned(self):
-        with patch('scripts.strip_lecturer_preamble.call_vision') as mock:
-            mock.return_value = "```markdown\n# Title\n\ncleaned content\n```"
+        with patch('scripts.strip_lecturer_preamble.safe_llm_call') as mock:
+            mock.return_value = ("```markdown\n# Title\n\ncleaned content\n```", "ok")
             result = lecturer_strip_block("# Title\n\n讲师认为 X")
             self.assertIn('cleaned content', result)
             self.assertNotIn('```markdown', result)
 
     def test_strip_block_llm_failure_keeps_original(self):
-        with patch('scripts.strip_lecturer_preamble.call_vision') as mock:
-            mock.side_effect = RuntimeError("API timeout")
+        with patch('scripts.strip_lecturer_preamble.safe_llm_call') as mock:
+            mock.return_value = ("", "error")
             original = "# Title\n\n讲师认为 X"
             result = lecturer_strip_block(original)
             self.assertEqual(result, original)
@@ -69,14 +69,14 @@ class TestStripLecturerPreamble(unittest.TestCase):
 class TestStripRolePersona(unittest.TestCase):
 
     def test_strip_block_returns_cleaned(self):
-        with patch('scripts.strip_role_persona.call_vision') as mock:
-            mock.return_value = "```markdown\n# Title\n\nrefactored content\n```"
+        with patch('scripts.strip_role_persona.safe_llm_call') as mock:
+            mock.return_value = ("```markdown\n# Title\n\nrefactored content\n```", "ok")
             result = persona_strip_block("# Title\n\n学员问 X")
             self.assertIn('refactored content', result)
 
     def test_strip_block_llm_failure_keeps_original(self):
-        with patch('scripts.strip_role_persona.call_vision') as mock:
-            mock.side_effect = RuntimeError("API timeout")
+        with patch('scripts.strip_role_persona.safe_llm_call') as mock:
+            mock.return_value = ("", "error")
             original = "# Title\n\n学员问 X"
             result = persona_strip_block(original)
             self.assertEqual(result, original)

@@ -227,38 +227,38 @@ class TestSmoothBlockMocked(unittest.TestCase):
 
     def test_returns_smoothed_text(self):
         block = H2Block('', [], '## 1. x\n\ncontent')
-        with patch('scripts._purify_smooth.call_vision') as mock_llm:
-            mock_llm.return_value = '## 1. x\n\nsmoothed content'
+        with patch('scripts._purify_smooth.safe_llm_call') as mock_llm:
+            mock_llm.return_value = ('## 1. x\n\nsmoothed content', 'ok')
             result = smooth_block(block)
             self.assertEqual(result, '## 1. x\n\nsmoothed content')
 
     def test_strips_markdown_wrapper(self):
         block = H2Block('', [], '## 1. x\n\ncontent')
-        with patch('scripts._purify_smooth.call_vision') as mock_llm:
-            mock_llm.return_value = '```markdown\n## 1. x\n\nsmoothed\n```'
+        with patch('scripts._purify_smooth.safe_llm_call') as mock_llm:
+            mock_llm.return_value = ('```markdown\n## 1. x\n\nsmoothed\n```', 'ok')
             result = smooth_block(block)
             self.assertEqual(result, '## 1. x\n\nsmoothed')
 
     def test_llm_failure_returns_original(self):
         """LLM 失败 → 返回原文(fail-soft)"""
         block = H2Block('', [], '## 1. x\n\ncontent')
-        with patch('scripts._purify_smooth.call_vision') as mock_llm:
-            mock_llm.side_effect = RuntimeError("API timeout")
+        with patch('scripts._purify_smooth.safe_llm_call') as mock_llm:
+            mock_llm.return_value = ('', 'error')
             result = smooth_block(block)
             self.assertEqual(result, block.raw_text)
 
     def test_llm_empty_returns_original(self):
         """LLM 返回空 → 返回原文"""
         block = H2Block('', [], '## 1. x\n\ncontent')
-        with patch('scripts._purify_smooth.call_vision') as mock_llm:
-            mock_llm.return_value = ""
+        with patch('scripts._purify_smooth.safe_llm_call') as mock_llm:
+            mock_llm.return_value = ('', 'empty')
             result = smooth_block(block)
             self.assertEqual(result, block.raw_text)
 
     def test_empty_block_returns_unchanged(self):
         """空块短路,不调 LLM"""
         block = H2Block('', [], '   \n')
-        with patch('scripts._purify_smooth.call_vision') as mock_llm:
+        with patch('scripts._purify_smooth.safe_llm_call') as mock_llm:
             result = smooth_block(block)
             self.assertEqual(result, '   \n')
             mock_llm.assert_not_called()
@@ -281,7 +281,7 @@ class TestSmoothDocumentMocked(unittest.TestCase):
 
     def test_dry_run_no_llm_call(self):
         """dry-run 不调 LLM,只输出切分信息"""
-        with patch('scripts._purify_smooth.call_vision') as mock_llm:
+        with patch('scripts._purify_smooth.safe_llm_call') as mock_llm:
             rc = smooth_document(self.input_path, self.output_path, dry_run=True)
             self.assertEqual(rc, 0)
             mock_llm.assert_not_called()
@@ -290,12 +290,12 @@ class TestSmoothDocumentMocked(unittest.TestCase):
 
     def test_full_flow_writes_smoothed(self):
         """完整流程:mock LLM 返回原标题 + 微调正文"""
-        def mock_llm_response(prompt, images, model='claude-sonnet-4-5'):
+        def mock_llm_response(*args, **kwargs):
             # 简单 mock:返回输入内容的轻微变体(标题保留)
             # 实际从 prompt 提取 h2_content 不易,直接返回包装过的 SAMPLE_MD
-            return '```markdown\n' + SAMPLE_MD + '\n```'
+            return ('```markdown\n' + SAMPLE_MD + '\n```', 'ok')
 
-        with patch('scripts._purify_smooth.call_vision',
+        with patch('scripts._purify_smooth.safe_llm_call',
                    side_effect=mock_llm_response):
             rc = smooth_document(
                 self.input_path, self.output_path,
@@ -316,8 +316,8 @@ class TestSmoothDocumentMocked(unittest.TestCase):
         big_input = Path(self.tmpdir) / 'big.md'
         big_input.write_text(big_md, encoding='utf-8')
 
-        with patch('scripts._purify_smooth.call_vision') as mock_llm:
-            mock_llm.return_value = big_md  # mock LLM 返回原输入
+        with patch('scripts._purify_smooth.safe_llm_call') as mock_llm:
+            mock_llm.return_value = (big_md, 'ok')  # mock LLM 返回原输入
             rc = smooth_document(
                 big_input, Path(self.tmpdir) / 'big_smoothed.md',
                 workers=1, max_chars=500,
@@ -329,8 +329,8 @@ class TestSmoothDocumentMocked(unittest.TestCase):
 
     def test_small_doc_one_chunk_per_h2(self):
         """小文档 + 大 max_chars → 每个 H2 = 1 chunk(无 H3 切分)"""
-        with patch('scripts._purify_smooth.call_vision') as mock_llm:
-            mock_llm.return_value = SAMPLE_MD
+        with patch('scripts._purify_smooth.safe_llm_call') as mock_llm:
+            mock_llm.return_value = (SAMPLE_MD, 'ok')
             rc = smooth_document(
                 self.input_path, self.output_path,
                 workers=1, max_chars=8000,

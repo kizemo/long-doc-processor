@@ -239,8 +239,8 @@ class TestPurifyChunkMocked(unittest.TestCase):
             expected_h2_title='1. Test',
             raw_text='## raw\n\ncontent',
         )
-        with patch('scripts.purify_v4_4_hierarchical.call_vision') as mock:
-            mock.return_value = '## 1. Test\n\ncleaned content'
+        with patch('scripts.purify_v4_4_hierarchical.safe_llm_call') as mock:
+            mock.return_value = ('## 1. Test\n\ncleaned content', 'ok')
             result = purify_chunk(chunk, 'model', total_chunks=3)
             self.assertEqual(result, '## 1. Test\n\ncleaned content')
             self.assertEqual(chunk.retry_count, 1)
@@ -253,11 +253,11 @@ class TestPurifyChunkMocked(unittest.TestCase):
             expected_h2_title='1. Test',
             raw_text='## raw\n\ncontent',
         )
-        with patch('scripts.purify_v4_4_hierarchical.call_vision') as mock:
+        with patch('scripts.purify_v4_4_hierarchical.safe_llm_call') as mock:
             # 第 1 次:2 个 H2;第 2 次:1 个 H2
             mock.side_effect = [
-                '## 1. Test\n\n## 2. Other\n\ncontent',  # 2 H2 → retry
-                '## 1. Test\n\ncleaned',                  # 1 H2 → ok
+                ('## 1. Test\n\n## 2. Other\n\ncontent', 'ok'),  # 2 H2 → retry
+                ('## 1. Test\n\ncleaned', 'ok'),                  # 1 H2 → ok
             ]
             result = purify_chunk(chunk, 'model', total_chunks=3)
             self.assertEqual(result, '## 1. Test\n\ncleaned')
@@ -271,8 +271,8 @@ class TestPurifyChunkMocked(unittest.TestCase):
             expected_h2_title='期望 H2',
             raw_text='## 实际 H2\n\ncontent',
         )
-        with patch('scripts.purify_v4_4_hierarchical.call_vision') as mock:
-            mock.return_value = '## A\n\n## B\n\n## C\n\nbad'  # 3 H2
+        with patch('scripts.purify_v4_4_hierarchical.safe_llm_call') as mock:
+            mock.return_value = ('## A\n\n## B\n\n## C\n\nbad', 'ok')  # 3 H2
             result = purify_chunk(chunk, 'model', total_chunks=3)
             # 兜底后应为 expected H2 + content
             self.assertIn('## 期望 H2', result)
@@ -285,8 +285,8 @@ class TestPurifyChunkMocked(unittest.TestCase):
             expected_h2_title='期望 H2',
             raw_text='content',
         )
-        with patch('scripts.purify_v4_4_hierarchical.call_vision') as mock:
-            mock.return_value = ""
+        with patch('scripts.purify_v4_4_hierarchical.safe_llm_call') as mock:
+            mock.return_value = ("", 'empty')
             result = purify_chunk(chunk, 'model', total_chunks=3)
             self.assertIn('## 期望 H2', result)
 
@@ -294,8 +294,8 @@ class TestPurifyChunkMocked(unittest.TestCase):
         chunk = Chunk(
             chunk_index=1, expected_h2_title='x', raw_text='raw'
         )
-        with patch('scripts.purify_v4_4_hierarchical.call_vision') as mock:
-            mock.return_value = '```markdown\n## x\n\ncontent\n```'
+        with patch('scripts.purify_v4_4_hierarchical.safe_llm_call') as mock:
+            mock.return_value = ('```markdown\n## x\n\ncontent\n```', 'ok')
             result = purify_chunk(chunk, 'model', total_chunks=1)
             self.assertEqual(result, '## x\n\ncontent')
 
@@ -316,7 +316,7 @@ class TestPurifyDocumentMocked(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_dry_run_no_llm(self):
-        with patch('scripts.purify_v4_4_hierarchical.call_vision') as mock:
+        with patch('scripts.purify_v4_4_hierarchical.safe_llm_call') as mock:
             rc = purify_document(self.input_path, self.output_path, dry_run=True)
             self.assertEqual(rc, 0)
             mock.assert_not_called()
@@ -324,14 +324,15 @@ class TestPurifyDocumentMocked(unittest.TestCase):
         self.assertFalse(self.output_path.exists())
 
     def test_full_flow_writes_cleaned(self):
-        def mock_llm(prompt, images, model):
+        def mock_llm(*args, **kwargs):
             # mock:返回包装后的 chunk.expected_h2_title
             import re as _re
+            prompt = args[0] if args else kwargs.get('prompt', '')
             m = _re.search(r"本块在 cleaned.md 中对应的 H2 标题为:\s*(.+?)$", prompt, _re.MULTILINE)
             h2 = m.group(1).strip() if m else "x"
-            return f"```markdown\n## {h2}\n\ncleaned content\n```"
+            return (f"```markdown\n## {h2}\n\ncleaned content\n```", "ok")
 
-        with patch('scripts.purify_v4_4_hierarchical.call_vision', side_effect=mock_llm):
+        with patch('scripts.purify_v4_4_hierarchical.safe_llm_call', side_effect=mock_llm):
             rc = purify_document(self.input_path, self.output_path, workers=1)
             self.assertEqual(rc, 0)
         self.assertTrue(self.output_path.exists())
@@ -346,13 +347,14 @@ class TestPurifyDocumentMocked(unittest.TestCase):
         skeleton_path = Path(self.tmpdir) / 'skeleton.md'
         skeleton_path.write_text(SAMPLE_SKELETON, encoding='utf-8')
 
-        def mock_llm(prompt, images, model):
+        def mock_llm(*args, **kwargs):
             # 从 prompt 提取期望 H2
+            prompt = args[0] if args else kwargs.get('prompt', '')
             m = re.search(r"本块在 cleaned.md 中对应的 H2 标题为:\s*(.+?)$", prompt, re.MULTILINE)
             h2 = m.group(1).strip() if m else "x"
-            return f'## {h2}\n\nok'
+            return (f'## {h2}\n\nok', 'ok')
 
-        with patch('scripts.purify_v4_4_hierarchical.call_vision', side_effect=mock_llm):
+        with patch('scripts.purify_v4_4_hierarchical.safe_llm_call', side_effect=mock_llm):
             rc = purify_document(
                 self.input_path, self.output_path,
                 skeleton_path=skeleton_path,

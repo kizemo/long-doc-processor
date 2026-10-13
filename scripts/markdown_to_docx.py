@@ -859,7 +859,9 @@ def _fix_list_numbering(docx_path, max_num_id):
             import time as _time; _time.sleep(0.1)
             try:
                 if os.path.exists(docx_path): os.remove(docx_path)
-            except OSError: pass
+            except OSError as _e:
+                # v4.21 修复(A6):不再静默 except,记录异常类别便于排查 Windows 文件锁
+                print(f'  [warn] os.remove 失败({type(_e).__name__}: {_e});继续 rename')
             os.rename(temp_path, docx_path)
     except Exception as e:
         print(f'  ⚠️ numbering修复失败: {e}')

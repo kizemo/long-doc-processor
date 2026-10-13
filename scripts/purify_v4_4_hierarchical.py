@@ -30,9 +30,9 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
-    from scripts._llm_vision import call_vision
+    from scripts._llm_vision import call_vision, safe_llm_call
 except ImportError:
-    from _llm_vision import call_vision  # type: ignore
+    from _llm_vision import call_vision, safe_llm_call  # type: ignore
 from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 
@@ -40,6 +40,7 @@ from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_N_CHUNKS = 8
+DEFAULT_MAX_CHARS = 8000  # SKILL Gotcha:超出会让 LLM 自由发挥(M-02 衍生)
 PURIFICATION_PROMPT_PATH = "references/purification-prompt.md"
 
 
@@ -209,11 +210,11 @@ def purify_chunk(chunk: Chunk, model: str, total_chunks: int) -> str:
 
     for attempt in range(1, 4):  # 最多 3 次(初 + 2 retry)
         chunk.retry_count = attempt
-        try:
-            response = call_vision(prompt, [], model=model)
-        except Exception as e:
-            log(f"[purify] chunk {chunk.chunk_index} 第 {attempt} 次 LLM 异常:{e}")
+        response, status = safe_llm_call(prompt, model=model)
+        if status != "ok":
+            log(f"[purify] chunk {chunk.chunk_index} 第 {attempt} 次 LLM status={status}")
             response = ""
+            continue
 
         if not response or not response.strip():
             log(f"[purify] chunk {chunk.chunk_index} 第 {attempt} 次 LLM 返回空")
@@ -274,11 +275,20 @@ def purify_document(input_path: Path, output_path: Path,
                     n_chunks: int = DEFAULT_N_CHUNKS,
                     model: str = DEFAULT_MODEL,
                     workers: int = 3,
-                    dry_run: bool = False) -> int:
-    """主入口:读 input → 切 chunk → 并发调 LLM → 写 cleaned.md。"""
+                    dry_run: bool = False,
+                    max_chars: int = DEFAULT_MAX_CHARS,
+                    strict: bool = False) -> int:
+    """主入口:读 input → 切 chunk → 并发调 LLM → 写 cleaned.md。
+
+    v4.21 增强(A4):
+      - max_chars:单 chunk 硬约束(默认 8000),超长直接 raise
+      - strict:LLM 失败时写 ERROR 标记 + exit 2(默认 fail-soft 向后兼容)
+    """
     if not input_path.exists():
         log(f"ERROR: 输入文件不存在:{input_path}")
         return 1
+
+    assert max_chars > 0, f"max_chars 必须 > 0,当前 {max_chars}"
 
     content = read_file_safely(input_path)
 
@@ -294,6 +304,14 @@ def purify_document(input_path: Path, output_path: Path,
     chunks = split_into_chunks(content, skeleton_h2, n_chunks=n_chunks)
     log(f"[purify] 切分为 {len(chunks)} 个 chunk (n_chunks={n_chunks})")
 
+    # A4 硬约束:任何单 chunk 不得超过 max_chars
+    oversized = [c for c in chunks if len(c.raw_text) > max_chars]
+    if oversized:
+        msg = (f"[purify] FAIL: {len(oversized)} 个 chunk 超过 max_chars={max_chars};"
+               f"最大 {max(len(c.raw_text) for c in oversized)} chars")
+        log(msg)
+        raise AssertionError(msg)
+
     if dry_run:
         log("[purify] dry-run,跳过 LLM")
         for c in chunks:
@@ -302,6 +320,7 @@ def purify_document(input_path: Path, output_path: Path,
 
     # 并发调 LLM
     cleaned_chunks: list[str] = [''] * len(chunks)
+    failed_chunks: list[int] = []  # 记录 LLM 全部失败的 chunk 索引
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_idx = {
             executor.submit(purify_chunk, c, model, len(chunks)): i
@@ -310,10 +329,31 @@ def purify_document(input_path: Path, output_path: Path,
         for future in as_completed(future_to_idx):
             i = future_to_idx[future]
             try:
-                cleaned_chunks[i] = future.result()
+                result = future.result()
+                # 判定 purify_chunk 是否 LLM 全部失败(返回的是 fallback_alignment)
+                # 简化判定:retry_count == 3 + h2_actual_count == 0 → fallback
+                chunk = chunks[i]
+                if chunk.retry_count >= 3 and chunk.h2_actual_count != 1:
+                    failed_chunks.append(i)
+                cleaned_chunks[i] = result
             except Exception as e:
-                log(f"[purify] chunk {i+1} 异常:{e};降级用骨架对齐")
+                log(f"[purify] chunk {i+1} 异常:{type(e).__name__}: {e};降级用骨架对齐")
+                failed_chunks.append(i)
                 cleaned_chunks[i] = _fallback_alignment(chunks[i])
+
+    # A4 fail-loud:strict 模式 + 有失败 chunk → 写 ERROR 标记 + exit 2
+    if failed_chunks:
+        log(f"[purify] WARN: {len(failed_chunks)} 个 chunk LLM 全部失败:{[i+1 for i in failed_chunks]}")
+        if strict:
+            # 写 ERROR 标记(替换失败 chunk)
+            for i in failed_chunks:
+                cleaned_chunks[i] = (
+                    f"## {chunks[i].expected_h2_title}\n\n"
+                    f"> **ERROR**:LLM 净化失败(strict 模式)\n\n"
+                    f"{chunks[i].raw_text}"
+                )
+        else:
+            log("[purify] fail-soft 模式,降级用骨架对齐已写入")
 
     # 重组 cleaned.md(preamble + 所有 chunks)
     first_h2_match = _H2_RE.search(content)
@@ -325,6 +365,10 @@ def purify_document(input_path: Path, output_path: Path,
     # 写文件
     write_file_safely(output_path, output)
     log(f"[purify] DONE: {output_path}")
+
+    if failed_chunks and strict:
+        # strict 模式:写完后 exit 2 提示用户检查 ERROR 段
+        return 2
     return 0
 
 
@@ -332,7 +376,7 @@ def purify_document(input_path: Path, output_path: Path,
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='v4.4 hierarchical 净化(8 chunk + LLM + 骨架对齐 + retry)',
+        description='v4.4 hierarchical 净化(8 chunk + LLM + 骨架对齐 + retry + v4.21 MAX_CHARS + --strict)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('input', type=Path, help='输入 raw/transcript md 路径')
@@ -340,9 +384,13 @@ def main() -> int:
     parser.add_argument('--skeleton', type=Path, help='skeleton.md 路径(可选,提供 H2 锚点)')
     parser.add_argument('--n-chunks', type=int, default=DEFAULT_N_CHUNKS,
                         help=f'目标 chunk 数(默认 {DEFAULT_N_CHUNKS})')
+    parser.add_argument('--max-chars', type=int, default=DEFAULT_MAX_CHARS,
+                        help=f'单 chunk 字符上限(默认 {DEFAULT_MAX_CHARS},超 raise)')
     parser.add_argument('--workers', type=int, default=3, help='并发 LLM 数')
     parser.add_argument('--model', default=DEFAULT_MODEL, help='LLM 模型 ID')
     parser.add_argument('--dry-run', action='store_true', help='只切分不调 LLM')
+    parser.add_argument('--strict', action='store_true',
+                        help='fail-loud:LLM 失败时写 ERROR 标记到输出 + exit 2(默认 fail-soft)')
     args = parser.parse_args()
 
     return purify_document(
@@ -352,6 +400,8 @@ def main() -> int:
         model=args.model,
         workers=args.workers,
         dry_run=args.dry_run,
+        max_chars=args.max_chars,
+        strict=args.strict,
     )
 
 

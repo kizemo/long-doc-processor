@@ -83,8 +83,8 @@ class TestLastSectionReprocessMocked(unittest.TestCase):
         path, tmpdir = self._write_doc()
         try:
             output = Path(tmpdir) / 'out.md'
-            with patch('scripts.last_section_reprocess.call_vision') as mock:
-                mock.return_value = "```markdown\n## 3. 末段(修复)\n\ncontent with 5 assets\n```"
+            with patch('scripts.last_section_reprocess.safe_llm_call') as mock:
+                mock.return_value = ("```markdown\n## 3. 末段(修复)\n\ncontent with 5 assets\n```", "ok")
                 rc = last_section_reprocess(path, output)
                 self.assertEqual(rc, 0)
             self.assertTrue(output.exists())
@@ -97,8 +97,8 @@ class TestLastSectionReprocessMocked(unittest.TestCase):
         path, tmpdir = self._write_doc()
         try:
             output = Path(tmpdir) / 'out.md'
-            with patch('scripts.last_section_reprocess.call_vision') as mock:
-                mock.side_effect = RuntimeError("API timeout")
+            with patch('scripts.last_section_reprocess.safe_llm_call') as mock:
+                mock.return_value = ("", "error")
                 rc = last_section_reprocess(path, output)
                 self.assertEqual(rc, 0)
             # 写入原文
@@ -111,8 +111,8 @@ class TestLastSectionReprocessMocked(unittest.TestCase):
         path, tmpdir = self._write_doc()
         try:
             output = Path(tmpdir) / 'out.md'
-            with patch('scripts.last_section_reprocess.call_vision') as mock:
-                mock.return_value = ""
+            with patch('scripts.last_section_reprocess.safe_llm_call') as mock:
+                mock.return_value = ("", "empty")
                 rc = last_section_reprocess(path, output)
                 self.assertEqual(rc, 0)
         finally:

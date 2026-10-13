@@ -33,10 +33,10 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 sys.path.insert(0, str(Path(__file__).parent))            # scripts/ for utils
 sys.path.insert(0, str(Path(__file__).parent.parent))     # project root for 'scripts' package
 try:
-    from scripts._llm_vision import call_vision  # noqa: E402
+    from scripts._llm_vision import call_vision, safe_llm_call  # noqa: E402
 except ImportError:
     # 兜底:直接 import(脚本与 _llm_vision.py 同目录)
-    from _llm_vision import call_vision  # noqa: E402
+    from _llm_vision import call_vision, safe_llm_call  # noqa: E402
 from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 
@@ -207,15 +207,16 @@ def smooth_block(block: H2Block, model: str = DEFAULT_MODEL) -> str:
     """调 LLM 对单个 H2 块做通顺化重写,返回新文本。
 
     容错:LLM 失败 / 返回非 markdown 时返回原文本(降级)。
+    v4.21 改用 safe_llm_call 统一 timeout/retry/status 分流。
     """
     if not block.raw_text.strip():
         return block.raw_text
 
     prompt = SMOOTH_PROMPT_TEMPLATE.format(h2_content=block.raw_text)
-    try:
-        response = call_vision(prompt, [], model=model)
-    except Exception as e:
-        log(f"[smooth] LLM 调用失败: {e};降级保留原文本")
+    response, status = safe_llm_call(prompt, model=model)
+
+    if status != "ok":
+        log(f"[smooth] LLM status={status};降级保留原文本")
         return block.raw_text
 
     if not response or not response.strip():

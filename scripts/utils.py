@@ -5,12 +5,15 @@
 - parse_frontmatter (YAML frontmatter 解析)
 - check_links (相对链接检查)
 - get_base_dir (返回 skill 安装根目录)
-- log (统一日志输出)
+- log (统一日志输出, 线程安全)
+- configure_stdout_utf8 (Windows 兼容 UTF-8, M-04 经验)
 """
 from __future__ import annotations
 
 import re
 import sys
+import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Tuple
 
@@ -40,9 +43,36 @@ def write_file_safely(path, content: str) -> None:
     p.write_text(content, encoding='utf-8')
 
 
+# 线程安全 log (M-04 经验, A2 实现) ---------------------------------
+
+_log_lock = threading.Lock()
+
+
 def log(msg: str) -> None:
-    """统一日志: stderr 输出, 不污染 stdout"""
-    print(msg, file=sys.stderr)
+    """统一日志: stderr 输出, 不污染 stdout, 线程安全(加锁)。
+
+    v4.21 起加 lock 防 3 worker 并发时日志行交错(原 print 在 Windows 下
+    多线程并发会撕裂单行输出);输出前缀时间戳便于排序。
+    """
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    with _log_lock:
+        print(f"[{ts}] {msg}", file=sys.stderr, flush=True)
+
+
+def configure_stdout_utf8() -> None:
+    """M-04:Windows terminal 默认 GBK,reconfigure 避免 UnicodeEncodeError。
+
+    在脚本入口 __main__ 调一次即可:
+        if __name__ == "__main__":
+            from utils import configure_stdout_utf8
+            configure_stdout_utf8()
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
 
 
 def parse_frontmatter(content: str) -> Tuple[dict, str]:

@@ -417,6 +417,7 @@ PYTHONIOENCODING=utf-8 python references/project_wrappers/_merge_parts_v2.py \
 - **项目级 ASR 错词规则按"长词在前、短词在后"顺序**（v4.16 新增）：避免短词误匹配（如"权占"必须在"权值"前替换）。详见 `scripts/_post_terms_fix.py`（skill 标准 + 数据驱动 YAML 配置）
 - **PURIFY_PROMPT 不删时间戳是历史 bug**（v4.16 文档化）：原 prompt "保留时间戳行格式"是 v4.5 之前的设计 bug，LLM 输出仍可能保留 `[XXXXXs → XXXXXs]` 前缀；`_purify_smooth` 强制删除，但要在 verify 后做最终检查（`grep -c "^\["` 应为 0）
 - **不要用 `_purify_smooth` 单步解决所有问题**（v4.16 新增）：通顺化只能改写原文，不会修复 LLM 删减过度的章节。如果 verify NO-INFO-LOSS FAIL（CJK 保留率 < 35%），需手动 enrich 第 1 章和末段补 5 类资产
+- **禁止静默 `except`（v4.21 新增,A6 沉淀）**：跨项目踩坑模式 M-02 证实,LLM 异常若无明确分类,debug 时无法区分 500/1026/rate_limit/timeout。**必须** `except Exception as e: log(f"<func>: {type(e).__name__}: {e}"); raise` 或 fallback。`grep -rn 'except.*pass\|except.*continue' scripts/` 必须 0 处。
 
 更细的失败模式见 `references/gotchas.md`。
 
@@ -615,6 +616,11 @@ Claude Code / Codex / 弱 runtime 之间的工具与路径差异见 `references/
 
 - **禁止 LLM 优化时新增单行 `>` blockquote**（v4.18）：LLM 倾向用 `>` 引用块作为视觉强调工具，但单行 blockquote 是视觉噪声（占行高 + 颜色差异小）。视觉强调一律用 `**加粗 inline**` 段落或合并到上下文。例外：多行 `>` box（≥2 行）作为"核心结论 box"是合法的。详见 `references/phase-1.7-semantic-pass.md` 规约 6。
 - **禁止 LLM 优化时保留讲师铺垫段**（v4.18）：章节正文内禁止出现课程安排/教学策略/回顾上次/现场写不单独发资料类讲师铺垫。这些是 ASR 转录产物，不增加信息量，应提炼为一句话目标陈述或直接删除。详见 `references/phase-1.7-semantic-pass.md` 规约 5。
+
+## v4.21 新增 Gotchas（2 条）
+
+- **禁止静默 `except`（v4.21 新增,A6 沉淀,M-02 衍生）**：跨项目踩坑模式 M-02 证实,LLM 异常若无明确分类,debug 时无法区分 500/1026/rate_limit/timeout。`except` 块必须 `log(f"...{type(e).__name__}: {e}...")` 记录异常类别,或 `raise` / 显式 fallback。`grep -rn 'except.*pass\|except.*continue' scripts/` 必须 0 处。详见 `scripts/_llm_vision.py:safe_llm_call` 7 种 status 分流。
+- **直播录屏 scenedetect 不适用,用 ffmpeg 等距抽帧（v4.21 新增,M-13 沉淀）**：165 min 直播录屏（画面静止）`scenedetect` 5+ min 无产出。改用 `ffmpeg -vf "select='not(mod(n,120))'"` 每 120s 一张,2 min 抽 83 张。详见 `history/v3.8-optimized/resource-study-report-2026-10-13.md` M-13 完整描述。
 
 ## v4.19 新增 Gotchas（3 条）
 

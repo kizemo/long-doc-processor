@@ -32,6 +32,13 @@
   1 = crv + fallback 都失败
   2 = 参数错误
   3 = crv 调用成功但产物解析失败(仍生成兜底 transcript.md 标注 ERROR)
+  4 = fallback(asr_faster_whisper)路径失败(v4.21 A5 新增, 区分主/兜底)
+
+v4.21 增强(A5,M-03/M-12 沉淀):
+  - fallback 路径加 timeout=7200(与主路径一致,防 6h 挂死)
+  - 入口 Path.resolve() 绝对化
+  - fallback 失败 exit code 3(原 exit 1,混淆主/兜底)
+  - crv_out_dir 必须绝对路径,否则 raise
 """
 from __future__ import annotations
 
@@ -97,10 +104,17 @@ def run_crv(input_path: Path, output_dir: Path, model: str, lang: str,
     """调 claude-real-video 处理 input,产物落到 output_dir。
 
     Returns: (exit_code, stdout, stderr)
+
+    v4.21 增强(A5,M-03 沉淀):
+      - output_dir 必须绝对路径,否则 raise(防 watcher 找错路径)
+      - input_path 已在外层 resolve()(M-12)
     """
     binary = find_crv_binary()
     if not binary:
         raise FileNotFoundError("claude-real-video 未安装;请 pip install 或检查 PATH")
+
+    # M-03 沉淀:crv-audio 路径必须绝对,watcher 才找得到产物
+    assert output_dir.is_absolute(), f"crv output_dir 必须绝对路径,当前 {output_dir}"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -282,6 +296,11 @@ def transcribe(input_path: Path, output_path: Path,
     if crv_out_dir is None:
         crv_out_dir = output_path.parent / '.crv-out'
 
+    # M-12 沉淀:crv_out_dir 必须绝对路径(M-03 衍生)
+    crv_out_dir = crv_out_dir.resolve()
+    if not crv_out_dir.is_absolute():
+        raise ValueError(f"crv_out_dir 必须为绝对路径,当前 {crv_out_dir}")
+
     crv_version = get_crv_version(binary) if binary else "n/a"
 
     if binary:
@@ -334,11 +353,17 @@ def transcribe(input_path: Path, output_path: Path,
 
 def _fallback_to_faster_whisper(input_path: Path, output_path: Path,
                                  model: str, lang: str) -> int:
-    """兜底:调 asr_faster_whisper.py 跑 whisper large-v3 路径"""
+    """兜底:调 asr_faster_whisper.py 跑 whisper large-v3 路径
+
+    v4.21 增强(A5):
+      - subprocess.run(..., timeout=7200) 兜底 6h 挂死
+      - 失败时 exit code 3(原 exit 1,无法区分主/兜底失败)
+      - input_path/output_path 已在外层 resolve()(M-12)
+    """
     fw_script = Path(__file__).parent / 'asr_faster_whisper.py'
     if not fw_script.exists():
         log("ERROR: 兜底脚本 asr_faster_whisper.py 不存在")
-        return 1
+        return 3  # exit 3 = fallback 路径失败
 
     # 转换 whisper model 名(turbo → large-v3-turbo)
     fw_model = 'large-v3' if model == 'turbo' else model
@@ -350,9 +375,15 @@ def _fallback_to_faster_whisper(input_path: Path, output_path: Path,
         '--model', fw_model,
     ]
     log(f"[fallback] cmd: {' '.join(cmd)}")
-    rc = subprocess.run(cmd, capture_output=True, text=True).returncode
-    log(f"[fallback] exit={rc}")
-    return rc
+    try:
+        # A5 关键:加 timeout=7200,与主路径一致,防 6h 挂死
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+        rc = proc.returncode
+        log(f"[fallback] exit={rc}")
+        return 3 if rc != 0 else 0  # 0=成功,3=fallback 失败(区别于主路径 1)
+    except subprocess.TimeoutExpired:
+        log(f"[fallback] TIMEOUT (7200s) — 防 6h 挂死,退出 3")
+        return 3
 
 
 # CLI --------------------------------------------------------------
