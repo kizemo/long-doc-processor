@@ -27,13 +27,10 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
-    from scripts._llm_vision import call_vision, safe_llm_call
+    from scripts._llm_vision import call_vision
 except ImportError:
-    from _llm_vision import call_vision, safe_llm_call  # type: ignore
-from utils import (  # noqa: E402
-    read_file_safely, write_file_safely, log,
-    make_verbose_status_callback, make_standard_parser, safe_main,
-)
+    from _llm_vision import call_vision  # type: ignore
+from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
@@ -89,8 +86,7 @@ def split_tail(text: str, tail_ratio: float = TAIL_RATIO) -> str:
 
 def last_section_reprocess(input_path: Path, output_path: Path,
                             tail_ratio: float = TAIL_RATIO,
-                            model: str = DEFAULT_MODEL,
-                            verbose: bool = False) -> int:
+                            model: str = DEFAULT_MODEL) -> int:
     """主入口:读 cleaned → 切末段 → 调 LLM → 重组 + 写。"""
     if not input_path.exists():
         log(f"ERROR: 输入文件不存在:{input_path}")
@@ -102,10 +98,10 @@ def last_section_reprocess(input_path: Path, output_path: Path,
 
     # 调 LLM
     prompt = LAST_SECTION_PROMPT.format(last_section=tail)
-    on_status = make_verbose_status_callback("last-section") if verbose else None
-    response, status = safe_llm_call(prompt, model=model, on_status=on_status)
-    if status != "ok":
-        log(f"[last-section] LLM status={status};fail-soft 保留原文")
+    try:
+        response = call_vision(prompt, [], model=model)
+    except Exception as e:
+        log(f"[last-section] LLM 异常:{e};fail-soft 保留原文")
         response = ""
 
     if response and response.strip():
@@ -153,9 +149,9 @@ def _strip_md_wrapper(text: str) -> str:
 
 
 def main() -> int:
-    # v4.22 F4:用 make_standard_parser 统一 boilerplate
-    parser = make_standard_parser(
-        'LAST-SECTION-COMPLETE 规约:末段独立修复(LLM)',
+    parser = argparse.ArgumentParser(
+        description='LAST-SECTION-COMPLETE 规约:末段独立修复(LLM)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('input', type=Path, help='cleaned.md 路径')
     parser.add_argument('-o', '--output', type=Path, required=True, help='输出 md 路径')
@@ -167,9 +163,8 @@ def main() -> int:
     return last_section_reprocess(
         args.input, args.output,
         tail_ratio=args.tail, model=args.model,
-        verbose=args.verbose,
     )
 
 
 if __name__ == '__main__':
-    sys.exit(safe_main(main))
+    sys.exit(main())

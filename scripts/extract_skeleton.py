@@ -23,12 +23,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 
-# v4.22 F1:heading 正则统一从 chunking 导入(等价 pattern)
-from chunking import _H1_TITLE_RE, _H2_TITLE_RE, _H3_TITLE_RE, _H4_TITLE_RE  # noqa: E402
-_H1_RE = _H1_TITLE_RE
-_H2_RE = _H2_TITLE_RE
-_H3_RE = _H3_TITLE_RE
-_H4_RE = _H4_TITLE_RE
+_H1_RE = re.compile(r'^(#)\s+(.+?)$', re.MULTILINE)
+_H2_RE = re.compile(r'^(##)\s+(.+?)$', re.MULTILINE)
+_H3_RE = re.compile(r'^(###)\s+(.+?)$', re.MULTILINE)
+_H4_RE = re.compile(r'^(####)\s+(.+?)$', re.MULTILINE)
 
 
 def extract_skeleton(input_path: Path, include_h3: bool = False,

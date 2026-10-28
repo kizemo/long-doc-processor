@@ -185,7 +185,8 @@ def doc_to_md_legacy(doc_path, output_path=None):
     
     result = subprocess.run(
         ['antiword', '-m', 'UTF-8.txt', doc_path],
-        capture_output=True, text=True
+        capture_output=True, text=True,
+        encoding="utf-8", errors="replace"
     )
     
     if result.returncode != 0:

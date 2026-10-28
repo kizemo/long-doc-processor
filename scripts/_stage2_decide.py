@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from scripts._llm_vision import call_vision  # absolute import per R2
+from scripts.frames_meta import load_frames_meta  # noqa: E402
 
 
 PROMPT_TEMPLATE = """你是视觉内容分析专家。请分析这张视频关键帧,并决定它对应讲座哪个 H3 子节。
@@ -128,13 +129,14 @@ def get_asr_context(asr_path: Path, timestamp: int, window: int = 30) -> str:
 
 def run_stage2(frames_dir: Path, frames_json: Path, top8_json: Path,
                asr_path: Path, full_md_path: Path, output_json: Path,
-               score_threshold: float = 0.65) -> list[dict]:
+               score_threshold: float = 0.65,
+               ocr_dir: Path | None = None) -> list[dict]:
     """对 top8 中每帧调 LLM,写 crop_decisions.json。
 
     Returns:
         决策 list,过滤 score < threshold
     """
-    frames = {f["id"]: f for f in json.loads(frames_json.read_text(encoding="utf-8"))}
+    frames = {f["id"]: f for f in load_frames_meta(frames_json, ocr_dir=ocr_dir)}
     top8 = json.loads(top8_json.read_text(encoding="utf-8"))
     full_md = full_md_path.read_text(encoding="utf-8")
 
@@ -190,10 +192,12 @@ def main() -> int:
     parser.add_argument("--asr-md", required=True, type=Path)
     parser.add_argument("--cleaned-md", required=True, type=Path)
     parser.add_argument("--output-json", required=True, type=Path)
+    parser.add_argument("--ocr-dir", type=Path, help="关键帧 OCR 文本目录(<id>.ocr.txt)")
     args = parser.parse_args()
     run_stage2(
         args.frames_dir, args.frames_json, args.top8_json,
-        args.asr_md, args.cleaned_md, args.output_json
+        args.asr_md, args.cleaned_md, args.output_json,
+        ocr_dir=args.ocr_dir
     )
     return 0
 

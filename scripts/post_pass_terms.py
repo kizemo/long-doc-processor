@@ -76,10 +76,39 @@ def post_pass_file(input_path: Path, output_path: Path) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description='post-pass 术语纠错')
-    parser.add_argument('--day', type=int, choices=[1, 2, 3])
+    parser.add_argument('--day', type=int, choices=[1, 2, 3],
+                        help='处理技能自带 day{N} 目录下的项目笔记(历史用法)')
+    parser.add_argument('--file', type=Path,
+                        help='直接处理指定的 md 文件(--day 的通用替代)')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='只报告将要发生的替换,不写文件')
     args = parser.parse_args()
 
     base = get_base_dir()
+
+    # ---- 通用模式: 处理任意 md 文件 ----
+    if args.file:
+        src = Path(args.file)
+        if not src.exists():
+            log(f"ERROR: 文件不存在: {src}")
+            sys.exit(1)
+        rules = load_safe_replacements()
+        content = read_file_safely(src)
+        new_content, counts = apply_context_safe_replace(content, rules)
+        changed = content != new_content
+        log(f"Post-pass: {src.name}  (rules={len(rules)})")
+        for k, v in counts.items():
+            if v > 0:
+                log(f"  {k}: {v} 次替换")
+        if not changed:
+            log("  无替换发生")
+        if args.dry_run:
+            log("  [dry-run] 未写文件")
+        else:
+            write_file_safely(src, new_content)
+            log(f"  已写回 {src}")
+        return
+
     days = [args.day] if args.day else [1, 2, 3]
     all_counts = {}
 

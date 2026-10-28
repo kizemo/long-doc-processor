@@ -12,9 +12,12 @@
   7. NO-SINGLE-SUBHEADING (v4.9) · H3/H4 下只挂 1 个次级标题
   8. TRAINING-AD-CHAPTER (v4.9.1) · 培训广告章节
   9. NO-NESTED-NUMBERING (v4.4) · H5 标题
- 10. H4-PER-H3-MAX (v4.4) · H4 ≤ 3/H3
- 11. H4-TOTAL-MAX (v4.4) · H4 ≤ 50 总数
+ 10. H4-PER-H3-MAX (v4.24) · H4 ≤ 18/H3
+ 11. H4-TOTAL-MAX (v4.24) · H4 ≤ max(50, 字符数/400)
  12. NO-ORPHAN-H3 (v4.4) · H3 孤立(无引言段)
+ 13. H3-PER-H2-MAX (v4.24) · 单章 H3 ≤ 18 组
+ 14. H3-TOTAL-MAX (v4.24) · H3 ≤ max(20, 字符数/3000)
+ 15. NO-SESSION-LABEL-IN-HEADING (v4.24) · 标题残留 ASR 场次标签
 
 LLM-driven 规约(由 phase-1.7 / strip_*.py 实现,verify 暂跳过):
   - NO-LECTURER-PREAMBLE
@@ -42,16 +45,35 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils import read_file_safely, parse_frontmatter, check_links, get_base_dir, log, find_files_by_ext  # noqa: E402
+from utils import read_file_safely, parse_frontmatter, check_links, get_base_dir, log  # noqa: E402
 
 import yaml
 
-# 标题正则(v4.22 F1:统一从 chunking 导入,消除 8 脚本重复定义)
-from chunking import _H2_TITLE_RE, _H3_TITLE_RE, _H4_TITLE_RE, _H5_TITLE_RE  # noqa: E402
-_H2_RE = _H2_TITLE_RE
-_H3_RE = _H3_TITLE_RE
-_H4_RE = _H4_TITLE_RE
-_H5_RE = _H5_TITLE_RE
+
+# 标题正则
+_H2_RE = re.compile(r'^##\s+(.+?)$', re.MULTILINE)
+_H3_RE = re.compile(r'^###\s+(.+?)$', re.MULTILINE)
+_H4_RE = re.compile(r'^####\s+(.+?)$', re.MULTILINE)
+_H5_RE = re.compile(r'^#####\s+(.+?)$', re.MULTILINE)
+
+# 标题规模预算(v4.24)----------------------------------------------------
+# 旧版把 H4 卡在 ≤3/H3、全文 ≤50,等于禁用 H4 层 ⇒ 知识点只能全部压平成 H3
+# (2026-10-28 实测:19 万字符的课程笔记膨胀到 434 个 H3)。
+# 新版按文档规模给预算:小文档仍收紧,大文档线性放宽。
+H4_PER_H3_MAX = 10          # 单个 H3 下最多承载的知识点数(H4)
+# 全文 H4 总量**不设上限**(v4.25)：知识点密度由 H4_PER_H3_MAX 与内容本身约束，
+# 再给全文配额只会迫使作者少用 H4、把知识点重新压回 H3(即 v4.24 前的病根)。
+H3_PER_H2_MAX = 18          # 单章(H2)下最多组数
+H3_TOTAL_BASE = 20          # 全文 H3 预算下限
+H3_CHARS_PER_HEADING = 3000  # 平均每 3000 字符允许 1 个 H3(≈1 组/1.5 屏)
+
+# ASR 场次标签(如「第一天上午」「第二天下午2」)—— 不得出现在任何标题里
+SESSION_LABEL_RE = re.compile(r'第[一二三四五六七八九十百0-9]+天[上下]午[0-9]*')
+
+
+def _budget(char_count: int, base: int, chars_per: int) -> int:
+    """按文档规模线性放宽的标题预算,不低于 base。"""
+    return max(base, char_count // chars_per)
 
 
 @dataclass
@@ -205,9 +227,7 @@ def verify_no_single_subheading(md_path: Path) -> RuleResult:
         elif line.startswith('## ') and not line.startswith('### '):
             # H2 切换,检查上一个 H3
             if current_h3_idx >= 0 and h4_count_under_h3 == 1 and not current_h3_has_intro:
-                issues_str = f"H3 '{current_h3_title}' 下只挂 1 个 H4 且无引言"
-                if append_str not in issues:
-                    issues.append(append_str)
+                issues.append(f"H3 '{current_h3_title}' 下只挂 1 个 H4 且无引言")
             current_h3_idx = -1
             current_h3_title = ''
             current_h3_has_intro = False
@@ -268,7 +288,7 @@ def verify_no_nested_numbering(md_path: Path) -> RuleResult:
 
 
 def verify_h4_per_h3_max(md_path: Path) -> RuleResult:
-    """H4-PER-H3-MAX (v4.4):H4 ≤ 3/H3。"""
+    """H4-PER-H3-MAX (v4.25):单 H3 下 H4 ≤ H4_PER_H3_MAX(10)。全文不设 H4 总量上限。"""
     content = read_file_safely(md_path)
     h3_h4: dict[int, int] = {}
     current_h3 = 0
@@ -277,27 +297,82 @@ def verify_h4_per_h3_max(md_path: Path) -> RuleResult:
             current_h3 += 1
             h3_h4[current_h3] = 0
         elif line.startswith('#### ') and not line.startswith('##### '):
-            h3_h3 = h3_h4.get(current_h3, 0)
-            h3_h4[current_h3] = h3_h3 + 1
+            h3_h4[current_h3] = h3_h4.get(current_h3, 0) + 1
 
-    overflow = {h3: n for h3, n in h3_h4.items() if n > 3}
+    overflow = {h3: n for h3, n in h3_h4.items() if n > H4_PER_H3_MAX}
     return RuleResult(
         name='H4_PER_H3_MAX',
         passed=len(overflow) == 0,
-        message=f"{len(overflow)} 个 H3 超出 3 个 H4" if overflow else 'PASS',
+        message=(f"{len(overflow)} 个 H3 超出 {H4_PER_H3_MAX} 个 H4"
+                 if overflow else f'PASS (≤{H4_PER_H3_MAX}/H3)'),
         details=[f"H3 #{h3}: {n} H4" for h3, n in overflow.items()],
     )
 
 
-def verify_h4_total_max(md_path: Path) -> RuleResult:
-    """H4-TOTAL-MAX (v4.4):全文 H4 ≤ 50。"""
+def verify_h3_per_h2_max(md_path: Path) -> RuleResult:
+    """H3-PER-H2-MAX (v4.24):单章 H2 下 H3 组数 ≤ H3_PER_H2_MAX(18)。"""
     content = read_file_safely(md_path)
-    h4_count = sum(1 for line in content.splitlines()
-                    if line.startswith('#### ') and not line.startswith('##### '))
+    per_h2: list[tuple[str, int]] = []
+    title = ''
+    n = 0
+    for line in content.splitlines():
+        if line.startswith('## ') and not line.startswith('### '):
+            if title:
+                per_h2.append((title, n))
+            title = line[3:].strip()
+            n = 0
+        elif line.startswith('### ') and not line.startswith('#### '):
+            if title:
+                n += 1
+    if title:
+        per_h2.append((title, n))
+
+    overflow = [(t, c) for t, c in per_h2 if c > H3_PER_H2_MAX]
     return RuleResult(
-        name='H4_TOTAL_MAX',
-        passed=h4_count <= 50,
-        message=f"H4 数 {h4_count} {'≤' if h4_count <= 50 else '>'} 50",
+        name='H3_PER_H2_MAX',
+        passed=len(overflow) == 0,
+        message=(f"{len(overflow)} 章 H3 数超 {H3_PER_H2_MAX}"
+                 if overflow else f'PASS (≤{H3_PER_H2_MAX}/章)'),
+        details=[f"{t[:40]}: {c} H3" for t, c in overflow],
+    )
+
+
+def verify_h3_total_max(md_path: Path) -> RuleResult:
+    """H3-TOTAL-MAX (v4.24):全文 H3 ≤ max(20, 字符数/3000)。"""
+    content = read_file_safely(md_path)
+    h3_count = sum(1 for line in content.splitlines()
+                   if line.startswith('### ') and not line.startswith('#### '))
+    budget = _budget(len(content), H3_TOTAL_BASE, H3_CHARS_PER_HEADING)
+    return RuleResult(
+        name='H3_TOTAL_MAX',
+        passed=h3_count <= budget,
+        message=f"H3 数 {h3_count} {'≤' if h3_count <= budget else '>'} 预算 {budget}",
+    )
+
+
+def verify_no_session_label_in_heading(md_path: Path) -> RuleResult:
+    """NO-SESSION-LABEL-IN-HEADING (v4.24):标题残留 ASR 场次标签 → FAIL。
+
+    场次(第一天上午/第二天下午)属于溯源信息,应留 ``_handoff.md`` /
+    ``_purge_stats.md``,不应进入读者可见的标题。正文提及不受限。
+    """
+    content = read_file_safely(md_path)
+    found: list[str] = []
+    in_fenced = False
+    for line in content.splitlines():
+        if line.lstrip().startswith('```'):
+            in_fenced = not in_fenced
+            continue
+        if in_fenced or not line.startswith('#'):
+            continue
+        m = re.match(r'^#{1,6}\s+(.+)$', line)
+        if m and SESSION_LABEL_RE.search(m.group(1)):
+            found.append(line.strip()[:80])
+    return RuleResult(
+        name='NO_SESSION_LABEL_IN_HEADING',
+        passed=len(found) == 0,
+        message=f"{len(found)} 个标题含场次标签" if found else 'PASS',
+        details=found[:10],
     )
 
 
@@ -329,368 +404,116 @@ def verify_no_orphan_h3(md_path: Path) -> RuleResult:
     )
 
 
-# v4.21 阶段 B 新增 8 条 verify 函数(整合 M-05/M-06/M-07/M-13 跨项目踩坑模式)
-# 详见 optimization-plan-v2-2026-10-13.md §2.1 + history/v3.8-optimized/resource-study-report-2026-10-13.md §5
+def verify_no_half_width_punct(md_path: Path) -> RuleResult:
+    """NO-HALF-WIDTH-PUNCT-IN-CN-CONTEXT (v4.21):中文上下文残留半角标点 → FAIL。
 
-def verify_no_role_persona_extended(md_path: Path) -> RuleResult:
-    """NO-ROLE-PERSONA-EXTENDED (v4.17) + M-07:扫描所有段落+表格单元格。
+    检测:行级扫描,中文之间残留 , ; : . ? ! ( ) 任一半角符号即 FAIL。
+    例外:Markdown 结构 / 数字上下文 / URL / 英文短语 / fenced code(已由
+    normalize_cn_punctuation.py 行级状态机保护,这里仅做粗扫描作为兜底)。
 
-    触发:讲师指出 / 讲师总结 / 讲师举例 / 学员搜索时 / 学员常见的错误
-    + 表格单元格内出现学员/讲师/主讲导师/大力老师/授课老师/教练。
-    例外:`讲师说:"原话"` 形式(原话在引号内)整句豁免。
+    Args:
+        md_path: 输入 md 路径
+
+    Returns:
+        RuleResult,失败时 details 列出每行的具体符号类型与位置。
     """
     content = read_file_safely(md_path)
-    bad_keywords = [
-        '学员', '讲师', '主讲导师', '大力老师', '授课老师', '教练',
-    ]
-    bad_phrases = [
-        '讲师指出', '讲师总结', '讲师举例', '学员搜索时', '学员常见的错误',
-        '有学员', '学员提问', '学员在选品时', '某学员', '某学员提出',
-    ]
-    # 引号内豁免的正则(整段被引号包围)
-    _QUOTE_EXEMPT_RE = re.compile(r'["""「][^"""]*?(讲师|学员|主讲导师|大力老师|授课老师|教练)[^"""]*?[""]')
-    found: list[str] = []
+    # 中文 CJK / 全角符号范围
+    cn_re = re.compile(r'[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]')
+    # 12 类半角标点(逐字符匹配)
+    halfwidth = ',;.:?!()\"\\'':'
 
-    lines = content.splitlines()
-    in_code = False
-    in_table = False
-    for i, line in enumerate(lines):
-        # 代码块内不算
-        if line.strip().startswith('```'):
-            in_code = not in_code
-            continue
-        if in_code:
-            continue
-        # 表格行(|...|)
-        is_table_row = line.strip().startswith('|') and line.strip().endswith('|')
-        if is_table_row:
-            in_table = True
-        elif line.strip() == '':
-            in_table = False
-
-        # 整段引号豁免(原话在引号内)
-        if _QUOTE_EXEMPT_RE.search(line):
-            continue
-
-        for phrase in bad_phrases:
-            if phrase in line:
-                found.append(f"line {i+1}: {phrase!r} in {line.strip()[:60]!r}")
-                break
-        else:
-            for kw in bad_keywords:
-                if kw in line:
-                    if in_table or is_table_row:
-                        found.append(f"line {i+1} (table): {kw!r} in {line.strip()[:60]!r}")
-                        break
-                    found.append(f"line {i+1}: {kw!r} in {line.strip()[:60]!r}")
-                    break
-
-    return RuleResult(
-        name='NO_ROLE_PERSONA_EXTENDED',
-        passed=len(found) == 0,
-        message=f"{len(found)} 处角色主语" if found else 'PASS',
-        details=found[:5],
-    )
-
-
-def verify_hierarchical_numbering(md_path: Path) -> RuleResult:
-    """HIERARCHICAL-NUMBERING (v4.17) + M-05:严格匹配 `N.` / `N.M` / `N.M.K`。
-
-    关键规避(M-05):正则与 SKILL.md 描述严格对齐(`## N xxx` 空格不要点号)。
-    v4.17 changelog:H2/H3/H4 强制 `1./1.1/1.1.1` 阿拉伯数字编号。
-    """
-    content = read_file_safely(md_path)
-    h2_re = re.compile(r'^##\s+(\d+)\.\s+\S')
-    h3_re = re.compile(r'^###\s+(\d+)\.(\d+)\s+\S')
-    h4_re = re.compile(r'^####\s+(\d+)\.(\d+)\.(\d+)\s+\S')
     issues: list[str] = []
-    last_h2 = 0
-    last_h3_per_h2: dict[int, int] = {}
-    last_h4_per_h3: dict[tuple[int, int], int] = {}
+    total_count = 0
+    in_fenced = False
 
-    for i, line in enumerate(content.splitlines()):
-        m2 = h2_re.match(line)
-        m3 = h3_re.match(line)
-        m4 = h4_re.match(line)
-        if m2:
-            n = int(m2.group(1))
-            if last_h2 > 0 and n != last_h2 + 1:
-                issues.append(f"line {i+1}: H2 跳号 {last_h2} → {n}")
-            last_h2 = n
-            last_h3_per_h2[n] = 0
-        elif m3:
-            h2_n = last_h2
-            h3_n = int(m3.group(2))
-            expected_h2 = int(m3.group(1))
-            if expected_h2 != h2_n:
-                issues.append(f"line {i+1}: H3 的 H2 编号 {expected_h2} ≠ 当前 H2 {h2_n}")
-            last = last_h3_per_h2.get(h2_n, 0)
-            if last > 0 and h3_n != last + 1:
-                issues.append(f"line {i+1}: H3 跳号 {last} → {h3_n}")
-            last_h3_per_h2[h2_n] = h3_n
-        elif m4:
-            h2_n = last_h2
-            h3_n = int(m4.group(2))
-            h4_n = int(m4.group(3))
-            key = (h2_n, h3_n)
-            last = last_h4_per_h3.get(key, 0)
-            if last > 0 and h4_n != last + 1:
-                issues.append(f"line {i+1}: H4 跳号 {last} → {h4_n}")
-            last_h4_per_h3[key] = h4_n
-
-    return RuleResult(
-        name='HIERARCHICAL_NUMBERING',
-        passed=len(issues) == 0,
-        message=f"{len(issues)} 处编号问题" if issues else 'PASS',
-        details=issues[:5],
-    )
-
-
-def verify_no_single_line_blockquote_callout(md_path: Path) -> RuleResult:
-    """NO-SINGLE-LINE-BLOCKQUOTE-CALLOUT (v4.18):单行 `>` 引用块不应作视觉强调。
-
-    关键规避(M-06):整篇 normalize 后检查,非 per-line。
-    单行 `>` = 该行只有 `> xxx` 且前后行不是 `>` 起始。
-    例外:多行 `>` box(≥2 行连续)合法。
-    """
-    content = read_file_safely(md_path)
-    lines = content.splitlines()
-    issues: list[str] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if line.startswith('>'):
-            # 检查是否多行 box(≥2 行连续 `>`)
-            j = i
-            while j < len(lines) and lines[j].strip().startswith('>'):
-                j += 1
-            block_size = j - i
-            if block_size == 1:
-                # 单行 callout
-                issues.append(f"line {i+1}: 单行 `>` blockquote:{line[:60]!r}")
-            i = j
-        else:
-            i += 1
-
-    return RuleResult(
-        name='NO_SINGLE_LINE_BLOCKQUOTE_CALLOUT',
-        passed=len(issues) == 0,
-        message=f"{len(issues)} 处单行 callout" if issues else 'PASS',
-        details=issues[:5],
-    )
-
-
-def verify_h3_lecturer_bio_extended(md_path: Path) -> RuleResult:
-    """H3-LECTURER-BIO 扩展 (v4.14):在 v4.9 基础上加 9 类黑名单词。
-
-    v4.14 changelog 新增:主讲人资历 / 直播核心主题 / 课程预告 / 线下 N 天 /
-    招生 / 系统课 / 主讲导师 资历 / 主讲人 介绍 / 老师 介绍
-    """
-    content = read_file_safely(md_path)
-    bad_keywords = [
-        # v4.9 原 11 类
-        '讲师资历', '讲师简介', '讲师介绍', '自我介绍',
-        '讲师背景', '主讲导师', '讲师自我介绍', '关于讲师', '关于主讲',
-        # v4.14 扩展 9 类
-        '主讲人资历', '直播核心主题', '课程预告', '线下', '招生', '系统课',
-        '主讲人介绍', '老师介绍', '讲师资历介绍',
-    ]
-    found: list[str] = []
-    for i, line in enumerate(content.splitlines()):
-        m = re.match(r'^#{2,4}\s+(.+)$', line)
-        if not m:
+    for i, line in enumerate(content.splitlines(), 1):
+        stripped = line.lstrip()
+        # fenced code 状态跟踪
+        if stripped.startswith('```'):
+            in_fenced = not in_fenced
             continue
-        title = m.group(1)
-        for kw in bad_keywords:
-            if kw in title:
-                found.append(f"line {i+1}: {line.strip()[:60]!r} 含 {kw!r}")
-                break
-    return RuleResult(
-        name='H3_LECTURER_BIO_EXTENDED',
-        passed=len(found) == 0,
-        message=f"{len(found)} 个讲师资历类标题(扩展)" if found else 'PASS',
-        details=found[:5],
-    )
-
-
-def verify_training_ad_chapter_extended(md_path: Path) -> RuleResult:
-    """TRAINING-AD-CHAPTER 扩展 (v4.14):在 v4.9.1 基础上加 4 类广告关键词。
-
-    v4.14 changelog 新增:会员价 / 购物车链接报名 / 线下系统课程 / 线下 N 天。
-    v4.9.1 原 13 类:陪跑 / 服务体系 / 年费 / 高客单服务 / 1v1 辅导课程 /
-    一对一辅导课程 / 线下诊断服务 / 工程师协助搭建 / 课程原价 / 扫码加入。
-    """
-    content = read_file_safely(md_path)
-    keywords = [
-        # v4.9.1 原关键词
-        '陪跑', '服务体系', '年费', '高客单服务',
-        '1v1 辅导课程', '一对一辅导课程', '线下诊断服务',
-        '工程师协助搭建', '课程原价', '扫码加入',
-        # v4.14 扩展 4 类
-        '会员价', '购物车链接报名', '线下系统课程', '线下 N 天',
-    ]
-    found: list[str] = []
-    for i, line in enumerate(content.splitlines()):
-        m = re.match(r'^##\s+(.+)$', line)
-        if not m:
+        if in_fenced:
             continue
-        title = m.group(1)
-        for kw in keywords:
-            if kw in title:
-                found.append(f"line {i+1}: H2 {title!r} 含广告关键词 {kw!r}")
-                break
+        # 跳过 markdown 表格行(含 | 且非首位字符)
+        if stripped.startswith('|'):
+            continue
+        # 跳过 markdown 标题行(以 # 开头,虽然内部不应有半角)
+        if stripped.startswith('#'):
+            continue
+
+        # 跳过 markdown 链接/图片的 **URL 目标** 与 inline code
+        # 规约 43 的例外清单明确写了:`[](url)` `![]()` `` ` `` 都属于合法半角,
+        # 必须原样保留 —— 否则图片文件名里的 `.jpg` 会被误判成「中文上下文半角句点」。
+        # 注意: alt 文本仍然参与扫描(那才是真正的正文)。
+        scan_line = re.sub(r'\]\([^)]*\)', ']()', line)
+        scan_line = re.sub(r'`[^`]*`', '``', scan_line)
+
+        # 检查中文之间的半角标点
+        for ch in halfwidth:
+            for m in re.finditer(re.escape(ch), scan_line):
+                pos = m.start()
+                prev_char = scan_line[pos - 1] if pos > 0 else ''
+                next_char = scan_line[pos + 1] if pos < len(scan_line) - 1 else ''
+                prev_cn = bool(cn_re.match(prev_char))
+                next_cn = bool(cn_re.match(next_char))
+                if prev_cn or next_cn:
+                    issues.append(
+                        f"line {i} pos {pos}: '{ch}' (U+{ord(ch):04X}) "
+                        f"in CN context [{prev_char!r}][{next_char!r}]"
+                    )
+                    total_count += 1
+
     return RuleResult(
-        name='TRAINING_AD_CHAPTER_EXTENDED',
-        passed=len(found) == 0,
-        message=f"{len(found)} 个培训广告章(扩展)" if found else 'PASS',
-        details=found[:5],
+        name='NO_HALF_WIDTH_PUNCT',
+        passed=total_count == 0,
+        message=f"{total_count} 处半角标点残留" if issues else 'PASS',
+        details=issues[:10],
     )
 
 
-def verify_img_size_within_limit(md_path: Path) -> RuleResult:
-    """img_size_within_limit (v4.19 + B1):markdown 引用图片 ≤ 200KB + ≤ 800x600。
+def verify_llm_steps_executed(md_path: Path) -> RuleResult:
+    """LLM-STEPS-EXECUTED (2026-10-24):净化产物不能与原始转写几乎一样。
 
-    解析 `![alt](path)` 语法,对本地路径(非 http/data)用 PIL 读图检查。
-    若 PIL 未装 → 跳过(SKILL.md 兼容 C 级校验)。
+    这条规则专门抓一个静默失效:`call_vision` 在后端不可用时返回空串 →
+    净化步骤 fail-soft 保留原文 → 流水线"成功"结束 → 交付一份**根本没净化过**
+    的 cleaned.md。从外面完全看不出发生过任何事。
+
+    判据(去掉空白后比较字符集合):
+      净化产物去掉所有空白后的内容,与原始转写去掉所有空白后的内容一致
+      ⇒ 判定 LLM 步骤未执行 → FAIL。
+
+    只在提供了 --raw-md 时有意义;没有原始转写就跳过(不判 FAIL)。
     """
-    content = read_file_safely(md_path)
-    img_re = re.compile(r'!\[.*?\]\(([^)]+)\)')
-    issues: list[str] = []
-
-    try:
-        from PIL import Image  # type: ignore
-    except ImportError:
-        # PIL 未装,跳过(本规则为 C 级诊断)
+    raw_path = getattr(verify_llm_steps_executed, "raw_md_path", None)
+    if raw_path is None or not Path(raw_path).exists():
+        return RuleResult(name='LLM_STEPS_EXECUTED', passed=True,
+                          message='SKIP(未提供 --raw-md)')
+    raw = read_file_safely(Path(raw_path))
+    cleaned = read_file_safely(md_path)
+    if not raw.strip():
+        return RuleResult(name='LLM_STEPS_EXECUTED', passed=True,
+                          message='SKIP(原始转写为空)')
+    squash = lambda s: ''.join(s.split())
+    a, b = squash(raw), squash(cleaned)
+    if not b:
+        return RuleResult(name='LLM_STEPS_EXECUTED', passed=False,
+                          message='净化产物为空')
+    if a == b:
         return RuleResult(
-            name='IMG_SIZE_WITHIN_LIMIT',
-            passed=True,
-            message='(PIL 未装,跳过)',
-        )
-
-    base = md_path.parent
-    for m in img_re.finditer(content):
-        src = m.group(1).strip()
-        # 跳过远程 / data URI
-        if src.startswith(('http://', 'https://', 'data:')):
-            continue
-        # 去掉 query / fragment
-        src_clean = src.split('?', 1)[0].split('#', 1)[0]
-        img_path = (base / src_clean).resolve()
-        if not img_path.exists():
-            # 图片不存在由 verify_html 19 处理,本规则不重复
-            continue
-        try:
-            size_kb = img_path.stat().st_size / 1024
-            if size_kb > 200:
-                issues.append(f"{src}: {size_kb:.1f}KB > 200KB")
-                continue
-            with Image.open(img_path) as im:
-                w, h = im.size
-                if w > 800 or h > 600:
-                    issues.append(f"{src}: {w}x{h} > 800x600")
-        except Exception as e:
-            issues.append(f"{src}: 读取失败 {type(e).__name__}: {e}")
-
-    return RuleResult(
-        name='IMG_SIZE_WITHIN_LIMIT',
-        passed=len(issues) == 0,
-        message=f"{len(issues)} 张超限图" if issues else 'PASS',
-        details=issues[:5],
-    )
-
-
-def verify_no_path_traversal(md_path: Path) -> RuleResult:
-    """no_path_traversal (B1):markdown 中 `<img src>` / 链接 不应含 `..`。
-
-    触发:`../` 路径可能跳到上层目录读取敏感文件(虽然本 skill 不写文件,
-    但 HTML 渲染时 `<img src="../../etc/passwd">` 是 XSS-like 风险)。
-    """
-    content = read_file_safely(md_path)
-    img_re = re.compile(r'!\[.*?\]\(([^)]+)\)')
-    link_re = re.compile(r'(?<!!)\[([^\]]+)\]\(([^)]+)\)')
-    issues: list[str] = []
-
-    for m in img_re.finditer(content):
-        src = m.group(1).strip()
-        if src.startswith(('http://', 'https://', 'data:')):
-            continue
-        if '..' in src:
-            issues.append(f"img src 含 `..`:{src!r}")
-
-    for m in link_re.finditer(content):
-        text, target = m.group(1), m.group(2)
-        if target.startswith(('http://', 'https://', 'mailto:', '#')):
-            continue
-        if '..' in target:
-            issues.append(f"link {text!r} 路径含 `..`:{target!r}")
-
-    return RuleResult(
-        name='NO_PATH_TRAVERSAL',
-        passed=len(issues) == 0,
-        message=f"{len(issues)} 处路径穿越" if issues else 'PASS',
-        details=issues[:5],
-    )
-
-
-def verify_no_doc_meta_header_blockquote(md_path: Path) -> RuleResult:
-    """NO-DOC-META-HEADER-BLOCKQUOTE (B1):H1 下 blockquote 元数据(与 NO-DOC-META-BLOCKQUOTE 互补)。
-
-    NO-DOC-META-BLOCKQUOTE 抓 `> 课程来源:` 等显式元描述;
-    本规则抓 H1 后紧跟的整段 blockquote 元描述(任意内容),因为 H1 下的
-    blockquote 通常是文档元信息(讲师/课程/时间/出处),应移到 frontmatter。
-    """
-    content = read_file_safely(md_path)
-    lines = content.splitlines()
-    h1_idx = -1
-    for i, line in enumerate(lines):
-        if line.startswith('# ') and not line.startswith('## '):
-            h1_idx = i
-            break
-    if h1_idx < 0:
-        return RuleResult(name='NO_DOC_META_HEADER_BLOCKQUOTE', passed=True)
-
-    # 看 H1 之后第一个非空行是否是 `> xxx`
-    j = h1_idx + 1
-    while j < len(lines) and not lines[j].strip():
-        j += 1
-    if j < len(lines) and lines[j].strip().startswith('>'):
-        bq = lines[j].strip()
+            name='LLM_STEPS_EXECUTED', passed=False,
+            message='净化产物与原始转写完全一致 ⇒ LLM 步骤疑似未执行(后端不可用?)')
+    # 高度相似(重合度 > 0.98)也算可疑
+    common = len(set(a) & set(b))
+    union = len(set(a) | set(b))
+    ratio = common / union if union else 0.0
+    if ratio > 0.98:
         return RuleResult(
-            name='NO_DOC_META_HEADER_BLOCKQUOTE',
-            passed=False,
-            message=f"H1 后紧跟 blockquote:{bq[:60]!r}",
-        )
-    return RuleResult(name='NO_DOC_META_HEADER_BLOCKQUOTE', passed=True)
-
-
-# v4.21 C3 阶段:--strict fail-loud 产物验证(整合 A4)
-
-def verify_purify_fail_loud(md_path: Path) -> RuleResult:
-    """PURIFY_FAIL_LOUD (v4.21 C3):strict 模式产物应含 ERROR 标记。
-
-    设计意图:A4 实现 --strict 模式后,LLM 失败的 chunk 在产物中
-    写 `> **ERROR**:LLM 净化失败(strict 模式)` 标记 + exit 2。
-    本规则验证产物中不应残留 ERROR 标记(若有,说明 LLM 部分仍失败)。
-
-    触发:产物含 `**ERROR**:LLM 净化失败` 或 `**ERROR**:LLM 失败`。
-    """
-    content = read_file_safely(md_path)
-    error_patterns = [
-        r'\*\*ERROR\*\*[::]\s*LLM 净化失败',
-        r'\*\*ERROR\*\*[::]\s*LLM 失败',
-    ]
-    found: list[str] = []
-    for pat in error_patterns:
-        for m in re.finditer(pat, content):
-            # 找到所在行
-            line_no = content[:m.start()].count('\n') + 1
-            found.append(f"line {line_no}: {m.group(0)[:60]!r}")
-    return RuleResult(
-        name='PURIFY_FAIL_LOUD',
-        passed=len(found) == 0,
-        message=f"{len(found)} 处 ERROR 标记(strict 模式残留)" if found else 'PASS',
-        details=found[:5],
-    )
+            name='LLM_STEPS_EXECUTED', passed=False,
+            message='净化产物与原始转写字符重合度 %.3f > 0.98 ⇒ LLM 步骤疑似未执行'
+                    % ratio)
+    return RuleResult(name='LLM_STEPS_EXECUTED', passed=True,
+                      message='char-set overlap=%.3f' % ratio)
 
 
 # 规则注册表 ----------------------------------------------------
@@ -708,59 +531,59 @@ RULES: list[tuple[str, Callable]] = [
     ('TRAINING_AD_CHAPTER', verify_training_ad_chapter),
     ('NO_NESTED_NUMBERING', verify_no_nested_numbering),
     ('H4_PER_H3_MAX', verify_h4_per_h3_max),
-    ('H4_TOTAL_MAX', verify_h4_total_max),
     ('NO_ORPHAN_H3', verify_no_orphan_h3),
-    # v4.21 B1 新增 8 项
-    ('NO_ROLE_PERSONA_EXTENDED', verify_no_role_persona_extended),
-    ('HIERARCHICAL_NUMBERING', verify_hierarchical_numbering),
-    ('NO_SINGLE_LINE_BLOCKQUOTE_CALLOUT', verify_no_single_line_blockquote_callout),
-    ('H3_LECTURER_BIO_EXTENDED', verify_h3_lecturer_bio_extended),
-    ('TRAINING_AD_CHAPTER_EXTENDED', verify_training_ad_chapter_extended),
-    ('IMG_SIZE_WITHIN_LIMIT', verify_img_size_within_limit),
-    ('NO_PATH_TRAVERSAL', verify_no_path_traversal),
-    ('NO_DOC_META_HEADER_BLOCKQUOTE', verify_no_doc_meta_header_blockquote),
-    # v4.21 C3 新增 1 项
-    ('PURIFY_FAIL_LOUD', verify_purify_fail_loud),
+    # v4.24 结构重排新增:给 H3 层预算 + 禁场次标签入标题
+    ('H3_PER_H2_MAX', verify_h3_per_h2_max),
+    ('H3_TOTAL_MAX', verify_h3_total_max),
+    ('NO_SESSION_LABEL_IN_HEADING', verify_no_session_label_in_heading),
+    # v4.21 新增
+    ('NO_HALF_WIDTH_PUNCT', verify_no_half_width_punct),
+    # 2026-10-24 新增
+    ('LLM_STEPS_EXECUTED', verify_llm_steps_executed),
 ]
 
 
 def verify_file(md_path: Path) -> list[RuleResult]:
-    """对单个文件跑全部规则,返回 RuleResult 列表。
-
-    v4.22 F2:content 缓存,21 条规则只读 1 次磁盘(原 21 次)。
-    通过 monkey-patch utils.read_file_safely 实现 verify_file 范围内缓存。
-    """
-    # 进入 verify_file:预读 + 替换 read_file_safely 为 cached 版本
-    import scripts.utils as _utils
-    _original_read = _utils.read_file_safely
-    _content_cache: dict[str, str] = {}
-    _cache_key = str(md_path)
-
-    def _cached_read(path):
-        key = str(path)
-        if key in _content_cache:
-            return _content_cache[key]
-        content = _original_read(path)
-        _content_cache[key] = content
-        return content
-
-    _utils.read_file_safely = _cached_read
-    try:
-        results: list[RuleResult] = []
-        for name, rule_fn in RULES:
-            try:
-                result = rule_fn(md_path)
-            except Exception as e:
-                result = RuleResult(name=name, passed=False, message=f'EXCEPTION: {e}')
-            results.append(result)
-        return results
-    finally:
-        _utils.read_file_safely = _original_read
+    """对单个文件跑全部规则,返回 RuleResult 列表。"""
+    results: list[RuleResult] = []
+    for name, rule_fn in RULES:
+        try:
+            result = rule_fn(md_path)
+        except Exception as e:
+            result = RuleResult(name=name, passed=False, message=f'EXCEPTION: {e}')
+        results.append(result)
+    return results
 
 
 def main() -> int:
+    """CLI:
+        python scripts/verify_all.py                       # 扫 base 目录下所有 md
+        python scripts/verify_all.py <cleaned.md>          # 只验指定文件
+        python scripts/verify_all.py <cleaned.md> --raw-md <transcript.md> --html <final.html>
+
+    注意(SKILL.md v4.21 之前写的是带参调用,但脚本并不读参数 —— 文档写什么
+    代码就得做什么,否则调用方会以为参数生效了)。
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(description="ad-cut/long-doc 规约全量校验")
+    ap.add_argument("files", nargs="*", type=Path, help="要校验的 md 文件(默认扫 base 目录)")
+    ap.add_argument("--raw-md", type=Path, help="原始转写(启用 LLM_STEPS_EXECUTED 交叉校验)")
+    ap.add_argument("--html", type=Path, help="最终 HTML(额外跑 verify_html)")
+    args = ap.parse_args()
+
+    if args.raw_md:
+        verify_llm_steps_executed.raw_md_path = args.raw_md
+
     base = get_base_dir()
-    md_files = find_files_by_ext(base, '.md')
+    if args.files:
+        md_files = [Path(f).resolve() for f in args.files]
+        missing = [str(f) for f in md_files if not f.exists()]
+        if missing:
+            print("ERROR: 文件不存在: %s" % ", ".join(missing), file=sys.stderr)
+            return 2
+    else:
+        md_files = sorted(base.rglob('*.md'))
     print(f"=== 全量验证 {len(md_files)} 个 md 文件 ({len(RULES)} 条规则) ===\n")
 
     fm_pass = 0
@@ -795,6 +618,23 @@ def main() -> int:
         for name, _ in RULES
         for _, r in all_results[name]
     )
+
+    # --html 额外跑 HTML 校验
+    if args.html:
+        print("\n=== HTML 校验 ===")
+        html_path = Path(args.html)
+        if not html_path.exists():
+            print("ERROR: HTML 文件不存在: %s" % html_path, file=sys.stderr)
+            return 2
+        try:
+            import verify_html
+            html_rc = verify_html.main(["verify_html", str(html_path)])
+        except Exception as e:
+            print("verify_html 执行异常: %s" % e, file=sys.stderr)
+            html_rc = 1
+        if html_rc != 0:
+            any_fail = True
+
     if any_fail:
         print(f"\n[FAIL] 有规则未通过,需修复")
         return 1

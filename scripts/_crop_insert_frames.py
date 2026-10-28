@@ -26,16 +26,24 @@ from pathlib import Path
 
 from PIL import Image
 
+sys.path.insert(0, str(Path(__file__).parent))
+from frames_meta import load_frames_meta  # noqa: E402
 
-def crop_box_to_pixels(crop_box: dict, frame_size: tuple[int, int]) -> tuple[int, int, int, int]:
-    """把 LLM 返回的 0-1 归一化 crop_box 转为像素坐标,带 5% padding 内缩 + 边界 clamp。
+
+def crop_box_to_pixels(crop_box: dict, frame_size: tuple[int, int],
+                        inset_pct: float = 0.05) -> tuple[int, int, int, int]:
+    """把 LLM 返回的 0-1 归一化 crop_box 转为像素坐标,带 padding 内缩 + 边界 clamp。
 
     Args:
         crop_box: {"x": float, "y": float, "w": float, "h": float},每个值 ∈ [0, 1]
         frame_size: (W, H) 原帧尺寸
+        inset_pct: 四边内缩比例(默认 0.05)。这是给**未经校准的 LLM 坐标**兜底用的
+            —— 坐标可能有 ±5% 偏差,内缩后主体不会被切到。
+            但当 crop_box 是**人工目视校准过**的(例如直接对源帧量像素),
+            内缩反而会切掉画面边缘的内容,此时应传 0。
 
     Returns:
-        (x, y, w, h) 像素坐标,已 clamp 到 [0, W] / [0, H],5% padding 内缩
+        (x, y, w, h) 像素坐标,已 clamp 到 [0, W] / [0, H]
     """
     W, H = frame_size
     # clamp 归一化值到 [0, 1]
@@ -44,9 +52,9 @@ def crop_box_to_pixels(crop_box: dict, frame_size: tuple[int, int]) -> tuple[int
     w_norm = max(0.0, min(1.0, crop_box.get("w", 1)))
     h_norm = max(0.0, min(1.0, crop_box.get("h", 1)))
 
-    # 转像素 + 5% padding 内缩 (各边各缩 5% 帧宽/高)
-    pad_w = int(0.05 * W)
-    pad_h = int(0.05 * H)
+    # 转像素 + padding 内缩 (各边各缩 inset_pct 帧宽/高)
+    pad_w = int(inset_pct * W)
+    pad_h = int(inset_pct * H)
     x = int(x_norm * W) + pad_w
     y = int(y_norm * H) + pad_h
     w = int(w_norm * W) - 2 * pad_w
@@ -73,7 +81,8 @@ def crop_box_to_pixels(crop_box: dict, frame_size: tuple[int, int]) -> tuple[int
 
 def crop_frame(frame_path: Path, crop_box: dict, output_path: Path,
                max_size: tuple[int, int] = (800, 600),
-               max_bytes: int = 200 * 1024) -> int:
+               max_bytes: int = 200 * 1024,
+               inset_pct: float = 0.05) -> int:
     """PIL 读帧 → 裁剪 → resize → JPEG 压缩到 ≤ max_bytes。
 
     Args:
@@ -82,13 +91,14 @@ def crop_frame(frame_path: Path, crop_box: dict, output_path: Path,
         output_path: 输出 JPEG 路径
         max_size: thumbnail 上限 (W, H),保持 aspect ratio
         max_bytes: 输出文件大小硬上限,默认 200KB
+        inset_pct: 四边内缩比例,见 crop_box_to_pixels()
 
     Returns:
         写入字节数
     """
     img = Image.open(frame_path).convert("RGB")
     W, H = img.size
-    x, y, w, h = crop_box_to_pixels(crop_box, (W, H))
+    x, y, w, h = crop_box_to_pixels(crop_box, (W, H), inset_pct=inset_pct)
     cropped = img.crop((x, y, x + w, y + h))
     cropped.thumbnail(max_size, Image.LANCZOS)
 
@@ -149,6 +159,10 @@ def main() -> int:
     parser.add_argument("--decisions-json", required=True, type=Path)
     parser.add_argument("--cleaned-md", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--ocr-dir", type=Path, help="关键帧 OCR 文本目录(<id>.ocr.txt)")
+    parser.add_argument("--inset-pct", type=float, default=0.05,
+                        help="crop_box 四边内缩比例(默认 0.05)。"
+                             "0.05 是给未校准的 LLM 坐标兜底;坐标已目视校准时传 0。")
     args = parser.parse_args()
 
     if not args.frames_json.exists():
@@ -158,7 +172,7 @@ def main() -> int:
         print(f"ERROR: crop_decisions.json not found: {args.decisions_json}", file=sys.stderr)
         return 1
 
-    frames = {f["id"]: f for f in json.loads(args.frames_json.read_text(encoding="utf-8"))}
+    frames = {f["id"]: f for f in load_frames_meta(args.frames_json, ocr_dir=args.ocr_dir)}
     decisions = json.loads(args.decisions_json.read_text(encoding="utf-8"))
 
     img_dir = args.output_dir / "img"
@@ -189,7 +203,8 @@ def main() -> int:
         rel_path = f"img/{out_name}"
 
         try:
-            size = crop_frame(frame_path, dec["crop_box"], out_path)
+            size = crop_frame(frame_path, dec["crop_box"], out_path,
+                              inset_pct=args.inset_pct)
             print(f"OK frame {frame_id} → {out_name} ({size} bytes)")
         except Exception as e:
             print(f"SKIP frame {frame_id}: PIL error {e}")

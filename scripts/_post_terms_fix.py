@@ -110,17 +110,64 @@ def load_rules(config_path: Path) -> list[dict[str, str]]:
             'from': str(r['from']),
             'to': str(r['to']),
             'context': str(r.get('context', '') or ''),
+            'phonetic': str(r.get('phonetic', '') or '').lower() in ('true', '1', 'yes'),
         })
 
-    return rules
+    return sort_rules_long_first(rules)
 
 
 def sort_rules_long_first(rules: list[dict[str, str]]) -> list[dict[str, str]]:
     """按 from 字符数降序排序,长词在前(避免短词误匹配)。
 
     SKILL.md v4.16 changelog 明确: "项目级 ASR 错词规则按长词在前、短词在后顺序"。
+    load_rules 已自动调用此函数,调用方无需重复排序。
     """
     return sorted(rules, key=lambda r: (-len(r['from']), r['from']))
+
+
+# 替换核心 ---------------------------------------------------------
+
+# 拼音转换模块(v4.22 同音变体支持) --------------------------
+
+_PYPINYIN_AVAILABLE = False
+_PYPINYIN_LAZY = None
+_PINYIN_CACHE: dict[str, str] = {}
+
+
+def _get_pinyin():
+    """惰性加载 pypinyin,失败时设置 _PYPINYIN_AVAILABLE=False。"""
+    global _PYPINYIN_AVAILABLE, _PYPINYIN_LAZY
+    if _PYPINYIN_LAZY is not None:
+        return _PYPINYIN_AVAILABLE
+    try:
+        from pypinyin import lazy_pinyin, Style
+        _PYPINYIN_LAZY = (lazy_pinyin, Style)
+        _PYPINYIN_AVAILABLE = True
+    except ImportError:
+        _PYPINYIN_AVAILABLE = False
+    return _PYPINYIN_AVAILABLE
+
+
+def to_pinyin(s: str) -> str:
+    """将中文字符串转为无声调拼音(用于同音字比较)。
+
+    Examples:
+        '控电机' → 'kongdianji'
+        '控点击' → 'kongdianji'
+        '磁包'   → 'cibɑo'    (note: pypinyin outputs 'cibɑo' or 'cibào')
+    """
+    if s in _PINYIN_CACHE:
+        return _PINYIN_CACHE[s]
+    if not _get_pinyin():
+        return s  # pypinyin 未安装,降级到字面比较
+    lazy_pinyin, Style = _PYPINYIN_LAZY
+    # 不带声调,小写,无空格
+    try:
+        py = ''.join(lazy_pinyin(s, style=Style.NORMAL, errors=lambda x: list(x)))
+    except Exception:
+        py = s
+    _PINYIN_CACHE[s] = py
+    return py
 
 
 # 替换核心 ---------------------------------------------------------
@@ -130,18 +177,35 @@ def apply_rule(content: str, rule: dict[str, str], window: int = 50) -> tuple[st
 
     - 若 context 为空:无脑替换
     - 若 context 非空:仅当 context 关键词出现在 from 周边 ±window 字符窗口内才替换
+    - context 支持 pipe-separated alternates:`投放|计划|出价|成交|投产` 任一出现在窗口内即匹配(v4.21)
+    - phonetic:true 启用同音变体匹配(v4.22):扫描输入中长度=N 的子串,pinyin 相等则替换
     """
+    # 字面模式
+    content, n_literal = _apply_literal_rule(content, rule, window)
+
+    # 同音模式
+    n_phonetic = 0
+    if rule.get('phonetic', False):
+        content, n_phonetic = _apply_phonetic_rule(content, rule, window)
+
+    return content, n_literal + n_phonetic
+
+
+def _apply_literal_rule(content: str, rule: dict[str, str], window: int) -> tuple[str, int]:
+    """字面匹配模式。"""
     pattern = re.compile(re.escape(rule['from']))
-    context = rule['context']
+    context = rule.get('context', '')
+    context_options = [c.strip() for c in context.split('|') if c.strip()] if context else []
     count = 0
 
     def repl(match: re.Match) -> str:
         nonlocal count
-        if context:
+        if context_options:
             start = max(0, match.start() - window)
             end = min(len(content), match.end() + window)
-            if context not in content[start:end]:
-                return match.group(0)  # 跳过
+            window_text = content[start:end]
+            if not any(opt in window_text for opt in context_options):
+                return match.group(0)
         count += 1
         return rule['to']
 
@@ -149,16 +213,105 @@ def apply_rule(content: str, rule: dict[str, str], window: int = 50) -> tuple[st
     return new_content, count
 
 
+def _apply_phonetic_rule(content: str, rule: dict[str, str], window: int) -> tuple[str, int]:
+    """同音匹配模式(v4.22)。
+
+    算法:
+      1. 计算 from 的 pinyin (如 '控点击' → 'kongdianji')
+      2. 在 content 中扫所有长度=N 的中文字符子串
+      3. 对每个子串计算 pinyin,与 from 的 pinyin 相等 → 替换
+      4. context 检查同字面模式
+    """
+    if not _get_pinyin():
+        return content, 0  # pypinyin 未安装,跳过
+
+    from_text = rule['from']
+    from_pinyin = to_pinyin(from_text)
+    target_len = len(from_text)
+
+    # 仅扫中文字符子串,跳过非中文
+    count = 0
+    result = []
+    i = 0
+    while i < len(content):
+        ch = content[i]
+        matched = False
+        if is_cjk(ch):
+            # 收集 target_len 个连续 CJK 字符
+            j = i
+            cjk_run = []
+            while j < len(content) and len(cjk_run) < target_len:
+                if is_cjk(content[j]):
+                    cjk_run.append(content[j])
+                    j += 1
+                else:
+                    break
+            # 如果收集到足够字符
+            if len(cjk_run) == target_len:
+                segment = ''.join(cjk_run)
+                segment_pinyin = to_pinyin(segment)
+                if segment_pinyin == from_pinyin and segment != from_text:
+                    # 匹配且不是原文 → 检查 context
+                    if _check_context(content, i, j, rule, window):
+                        result.append(rule['to'])
+                        count += 1
+                        i = j  # 跳过已替换字符
+                        matched = True
+        if not matched:
+            # 非 CJK 或未匹配 → 保留原文
+            result.append(ch)
+            i += 1
+
+    return ''.join(result), count
+
+
+def _check_context(content: str, start: int, end: int, rule: dict, window: int) -> bool:
+    """检查 from 周边 ±window 字符窗口内是否有 context 关键词。
+
+    与 _apply_literal_rule 中的逻辑保持一致。
+    """
+    context = rule.get('context', '')
+    if not context:
+        return True
+    context_options = [c.strip() for c in context.split('|') if c.strip()]
+    win_start = max(0, start - window)
+    win_end = min(len(content), end + window)
+    window_text = content[win_start:win_end]
+    return any(opt in window_text for opt in context_options)
+
+
+def is_cjk(ch: str) -> bool:
+    """判断字符是否为汉字(用于切分同音候选集)。"""
+    if not ch:
+        return False
+    code = ord(ch)
+    return (
+        0x4E00 <= code <= 0x9FFF       # CJK 统一表意
+        or 0x3400 <= code <= 0x4DBF     # CJK 扩展 A
+        or 0x20000 <= code <= 0x2A6DF  # CJK 扩展 B
+        or 0xF900 <= code <= 0xFAFF    # CJK 兼容
+        or 0x2F800 <= code <= 0x2FA1F  # CJK 兼容补充
+    )
+
+
 def apply_corrections(content: str, rules: list[dict[str, str]],
                      window: int = 50) -> tuple[str, dict[str, int]]:
-    """应用所有规则,返回(新内容, 每条规则的替换次数)。"""
+    """应用所有规则,返回(新内容, 每条规则的替换次数)。
+
+    注意:内部自动 sort_rules_long_first() 排序,长词在前避免短词误匹配。
+    规则带 phonetic:true 时会触发同音匹配(v4.22),用 [phonetic] 后缀标注。
+    """
     counts: dict[str, int] = {}
-    for rule in rules:
+    for rule in sort_rules_long_first(rules):
+        is_phonetic = rule.get('phonetic', False)
+        old_content = content
         content, n = apply_rule(content, rule, window)
         if n > 0:
             label = f"{rule['from']}→{rule['to']}"
-            if rule['context']:
+            if rule.get('context'):
                 label += f" (ctx={rule['context']})"
+            if is_phonetic:
+                label += " [phonetic]"
             counts[label] = n
     return content, counts
 

@@ -186,7 +186,9 @@ def renumber_doc(input_path: str, output_path: str, scheme: str = 'chinese',
             if scheme == 'chinese':
                 prefix = f'第{chinese_num(h2_num)}章'
             else:
-                prefix = f'{h2_num}'
+                # 规约 06 要求 H2/H3/H4 强制 `1./1.1/1.1.1` —— H2 必须带尾点，
+                # 否则 H2(`1`) 与 H3(`1.1`) 的编号格式不一致，且自检正则会误判。
+                prefix = f'{h2_num}.'
             
             new_line = f'## {prefix} {new_title}\n'
             stats['renamed_h2'].append(f'{prefix} {new_title}')
@@ -284,7 +286,9 @@ def verify_renumbered(file_path: str) -> dict:
     warnings = []
     
     # 1. 检查无编号H2（支持中文章节号和数字章节号）
-    unnumbered_h2 = re.findall(r'^## (?!第[一二三四五六七八九十百千\d]+章\s|^\d+\s)[^#]', content, re.MULTILINE)
+    #    注意: lookahead 里的 `^` 在 `^## ` 之后永远匹配不上(位置已在行中),
+    #    写 `^\d+\s` 会让**所有**已编号 H2 都被误判为"无编号"。
+    unnumbered_h2 = re.findall(r'^## (?!第[一二三四五六七八九十百千\d]+章\s|\d+\.?\s)[^#]', content, re.MULTILINE)
     if unnumbered_h2:
         lines_unnumbered = [l.strip() for l in unnumbered_h2]
         issues.append(f'无编号H2: {len(lines_unnumbered)}个 → {lines_unnumbered[:3]}')

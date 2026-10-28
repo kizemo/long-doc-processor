@@ -4,12 +4,10 @@
 清理讲师铺垫类表述:开场白、寒暄、自介、Q&A 引导、讲师前缀等。
 **禁止 regex**(v4.17 Gotcha 警示:regex 无法识别引号内例外)。
 
-v4.21 增强(A3):按 H2 切分 + 并发 LLM(共用 scripts/chunking.py),
-原单块全文送 LLM 改为 N 个 H2 块独立调,避免 30K 输入超 8K 单块限制。
+通过 LLM 改写,直接陈述事实(去掉"讲师认为/说/指出/总结/提醒/举例"前缀)。
 
 用法:
   python scripts/strip_lecturer_preamble.py <input.md> -o <output.md> [--workers 3]
-  python scripts/strip_lecturer_preamble.py <input.md> -o <output.md> --max-chars 8000
 
 退出码:
   0 = 成功
@@ -30,21 +28,13 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
-    from scripts._llm_vision import call_vision, safe_llm_call
+    from scripts._llm_vision import call_vision
 except ImportError:
-    from _llm_vision import call_vision, safe_llm_call  # type: ignore
-from utils import (  # noqa: E402
-    read_file_safely, write_file_safely, log,
-    make_verbose_status_callback, make_standard_parser, safe_main,
-)
-try:
-    from scripts.chunking import chunk_for_llm, H2Block  # noqa: E402
-except ImportError:
-    from chunking import chunk_for_llm, H2Block  # type: ignore
+    from _llm_vision import call_vision  # type: ignore
+from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
-DEFAULT_MAX_CHARS = 8000  # SKILL Gotcha:超出会让 LLM 自由发挥
 
 # Prompt 模板
 LECTURER_PREAMBLE_PROMPT = """你是中文电商培训讲义文稿的"讲师铺垫清理"专家。
@@ -91,20 +81,16 @@ LECTURER_PREAMBLE_PROMPT = """你是中文电商培训讲义文稿的"讲师铺�
 """
 
 
-def strip_block(content: str, model: str = DEFAULT_MODEL, on_status=None) -> str:
-    """对单块做讲师铺垫清理。LLM 失败时返回原内容(fail-soft)。
-
-    v4.21 改用 safe_llm_call 统一 timeout/retry/status 分流。
-    v4.21 C4 阶段:on_status 回调(verbose 模式用)。
-    """
+def strip_block(content: str, model: str = DEFAULT_MODEL) -> str:
+    """对单块做讲师铺垫清理。LLM 失败时返回原内容(fail-soft)。"""
     if not content.strip():
         return content
 
     prompt = LECTURER_PREAMBLE_PROMPT.format(content=content)
-    response, status = safe_llm_call(prompt, model=model, on_status=on_status)
-
-    if status != "ok":
-        log(f"[strip-lecturer] LLM status={status};降级保留原内容")
+    try:
+        response = call_vision(prompt, [], model=model)
+    except Exception as e:
+        log(f"[strip-lecturer] LLM 异常:{e};降级保留原内容")
         return content
 
     if not response or not response.strip():
@@ -120,77 +106,30 @@ def _strip_md_wrapper(text: str) -> str:
     return m.group(1) if m else text
 
 
-def strip_document(
-    input_path: Path,
-    output_path: Path,
-    model: str = DEFAULT_MODEL,
-    workers: int = 3,
-    max_chars: int = DEFAULT_MAX_CHARS,
-    verbose: bool = False,
-) -> int:
-    """主入口(v4.21 改):读 input → chunk_by_h2 → 并发 LLM → 重组 → 写输出。"""
-    if not input_path.exists():
-        log(f"ERROR: 输入文件不存在:{input_path}")
-        return 1
-
-    content = read_file_safely(input_path)
-    preamble, chunks = chunk_for_llm(content, max_chars=max_chars)
-    log(f"[strip-lecturer] 切分:{len(chunks)} 个 H2 块 (max_chars={max_chars})")
-
-    if not chunks:
-        # 无 H2,整篇当 preamble 写回
-        write_file_safely(output_path, content)
-        log(f"[strip-lecturer] 无 H2,直接写原文 {output_path}")
-        return 0
-
-    on_status = make_verbose_status_callback("strip-lecturer") if verbose else None
-
-    # 并发调 LLM
-    cleaned_chunks: list[str] = [''] * len(chunks)
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_idx = {
-            executor.submit(strip_block, c.raw_text, model, on_status): i
-            for i, c in enumerate(chunks)
-        }
-        for future in as_completed(future_to_idx):
-            i = future_to_idx[future]
-            try:
-                cleaned_chunks[i] = future.result()
-            except Exception as e:
-                log(f"[strip-lecturer] chunk {i+1} 异常:{type(e).__name__}: {e};降级原内容")
-                cleaned_chunks[i] = chunks[i].raw_text
-
-    # 重组输出
-    output = preamble + ''.join(cleaned_chunks)
-    if not output.endswith('\n'):
-        output += '\n'
-
-    write_file_safely(output_path, output)
-    log(f"[strip-lecturer] wrote {output_path}")
-    return 0
-
-
 def main() -> int:
-    # v4.22 F4:用 make_standard_parser 统一 boilerplate
-    parser = make_standard_parser(
-        'NO-LECTURER-PREAMBLE 规约:清理讲师铺垫(LLM 改写,H2 chunked)',
-        add_workers=True,
+    parser = argparse.ArgumentParser(
+        description='NO-LECTURER-PREAMBLE 规约:清理讲师铺垫(LLM 改写)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('input', type=Path, help='输入 md 路径')
     parser.add_argument('-o', '--output', type=Path, required=True, help='输出 md 路径')
     parser.add_argument('--model', default=DEFAULT_MODEL, help='LLM 模型 ID')
-    parser.add_argument('--max-chars', type=int, default=DEFAULT_MAX_CHARS,
-                        help=f'单块字符上限(默认 {DEFAULT_MAX_CHARS},v4.21 A3 沉淀)')
+    parser.add_argument('--workers', type=int, default=3, help='并发 LLM 数')
     args = parser.parse_args()
 
-    return strip_document(
-        args.input, args.output,
-        model=args.model,
-        workers=args.workers,
-        max_chars=args.max_chars,
-        verbose=args.verbose,
-    )
+    if not args.input.exists():
+        log(f"ERROR: 输入文件不存在:{args.input}")
+        return 1
+
+    content = read_file_safely(args.input)
+
+    # 简单做法:整文件一次性送 LLM(文档通常 < 30K chars 适配 8K 单块限制)
+    # 大文档需要切块,这里为简单起见,直接全文
+    cleaned = strip_block(content, args.model)
+    write_file_safely(args.output, cleaned)
+    log(f"[strip-lecturer] wrote {args.output}")
+    return 0
 
 
 if __name__ == '__main__':
-    sys.exit(safe_main(main))
+    sys.exit(main())

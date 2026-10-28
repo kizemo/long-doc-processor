@@ -5,12 +5,8 @@
 改为通用角色:案例店铺 / 商家 / 运营团队 / 某案例。
 **禁止 regex**(v4.17 Gotcha:regex 无法识别引号内讲师原话例外)。
 
-v4.21 增强(A3):按 H2 切分 + 并发 LLM(共用 scripts/chunking.py),
-原单块全文送 LLM 改为 N 个 H2 块独立调,避免 30K 输入超 8K 单块限制。
-
 用法:
   python scripts/strip_role_persona.py <input.md> -o <output.md> [--workers 3]
-  python scripts/strip_role_persona.py <input.md> -o <output.md> --max-chars 8000
 
 退出码:
   0 = 成功
@@ -22,7 +18,6 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -31,21 +26,13 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
-    from scripts._llm_vision import call_vision, safe_llm_call
+    from scripts._llm_vision import call_vision
 except ImportError:
-    from _llm_vision import call_vision, safe_llm_call  # type: ignore
-from utils import (  # noqa: E402
-    read_file_safely, write_file_safely, log,
-    make_verbose_status_callback, make_standard_parser, safe_main,
-)
-try:
-    from scripts.chunking import chunk_for_llm  # noqa: E402
-except ImportError:
-    from chunking import chunk_for_llm  # type: ignore
+    from _llm_vision import call_vision  # type: ignore
+from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
-DEFAULT_MAX_CHARS = 8000
 
 # Prompt 模板
 ROLE_PERSONA_PROMPT = """你是中文电商培训讲义文稿的"角色润色"专家。
@@ -93,20 +80,16 @@ ROLE_PERSONA_PROMPT = """你是中文电商培训讲义文稿的"角色润色"�
 """
 
 
-def strip_block(content: str, model: str = DEFAULT_MODEL, on_status=None) -> str:
-    """对单块做角色润色。LLM 失败时返回原内容(fail-soft)。
-
-    v4.21 改用 safe_llm_call 统一 timeout/retry/status 分流。
-    v4.21 C4 阶段:on_status 回调(verbose 模式用)。
-    """
+def strip_block(content: str, model: str = DEFAULT_MODEL) -> str:
+    """对单块做角色润色。LLM 失败时返回原内容(fail-soft)。"""
     if not content.strip():
         return content
 
     prompt = ROLE_PERSONA_PROMPT.format(content=content)
-    response, status = safe_llm_call(prompt, model=model, on_status=on_status)
-
-    if status != "ok":
-        log(f"[strip-persona] LLM status={status};降级保留原内容")
+    try:
+        response = call_vision(prompt, [], model=model)
+    except Exception as e:
+        log(f"[strip-persona] LLM 异常:{e};降级保留原内容")
         return content
 
     if not response or not response.strip():
@@ -121,74 +104,26 @@ def _strip_md_wrapper(text: str) -> str:
     return m.group(1) if m else text
 
 
-def strip_document(
-    input_path: Path,
-    output_path: Path,
-    model: str = DEFAULT_MODEL,
-    workers: int = 3,
-    max_chars: int = DEFAULT_MAX_CHARS,
-    verbose: bool = False,
-) -> int:
-    """主入口(v4.21 改):读 input → chunk_by_h2 → 并发 LLM → 重组 → 写输出。"""
-    if not input_path.exists():
-        log(f"ERROR: 输入文件不存在:{input_path}")
-        return 1
-
-    content = read_file_safely(input_path)
-    preamble, chunks = chunk_for_llm(content, max_chars=max_chars)
-    log(f"[strip-persona] 切分:{len(chunks)} 个 H2 块 (max_chars={max_chars})")
-
-    if not chunks:
-        write_file_safely(output_path, content)
-        log(f"[strip-persona] 无 H2,直接写原文 {output_path}")
-        return 0
-
-    on_status = make_verbose_status_callback("strip-persona") if verbose else None
-
-    cleaned_chunks: list[str] = [''] * len(chunks)
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_idx = {
-            executor.submit(strip_block, c.raw_text, model, on_status): i
-            for i, c in enumerate(chunks)
-        }
-        for future in as_completed(future_to_idx):
-            i = future_to_idx[future]
-            try:
-                cleaned_chunks[i] = future.result()
-            except Exception as e:
-                log(f"[strip-persona] chunk {i+1} 异常:{type(e).__name__}: {e};降级原内容")
-                cleaned_chunks[i] = chunks[i].raw_text
-
-    output = preamble + ''.join(cleaned_chunks)
-    if not output.endswith('\n'):
-        output += '\n'
-
-    write_file_safely(output_path, output)
-    log(f"[strip-persona] wrote {output_path}")
-    return 0
-
-
 def main() -> int:
-    # v4.22 F4:用 make_standard_parser 统一 boilerplate
-    parser = make_standard_parser(
-        'NO-ROLE-PERSONA 规约:角色润色(LLM 改写,H2 chunked)',
-        add_workers=True,
+    parser = argparse.ArgumentParser(
+        description='NO-ROLE-PERSONA 规约:角色润色(LLM 改写)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('input', type=Path, help='输入 md 路径')
     parser.add_argument('-o', '--output', type=Path, required=True, help='输出 md 路径')
     parser.add_argument('--model', default=DEFAULT_MODEL, help='LLM 模型 ID')
-    parser.add_argument('--max-chars', type=int, default=DEFAULT_MAX_CHARS,
-                        help=f'单块字符上限(默认 {DEFAULT_MAX_CHARS},v4.21 A3 沉淀)')
     args = parser.parse_args()
 
-    return strip_document(
-        args.input, args.output,
-        model=args.model,
-        workers=args.workers,
-        max_chars=args.max_chars,
-        verbose=args.verbose,
-    )
+    if not args.input.exists():
+        log(f"ERROR: 输入文件不存在:{args.input}")
+        return 1
+
+    content = read_file_safely(args.input)
+    cleaned = strip_block(content, args.model)
+    write_file_safely(args.output, cleaned)
+    log(f"[strip-persona] wrote {args.output}")
+    return 0
 
 
 if __name__ == '__main__':
-    sys.exit(safe_main(main))
+    sys.exit(main())

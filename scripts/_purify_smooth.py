@@ -33,93 +33,44 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 sys.path.insert(0, str(Path(__file__).parent))            # scripts/ for utils
 sys.path.insert(0, str(Path(__file__).parent.parent))     # project root for 'scripts' package
 try:
-    from scripts._llm_vision import call_vision, safe_llm_call  # noqa: E402
+    from scripts._llm_vision import call_vision  # noqa: E402
 except ImportError:
     # 兜底:直接 import(脚本与 _llm_vision.py 同目录)
-    from _llm_vision import call_vision, safe_llm_call  # noqa: E402
-from utils import (  # noqa: E402
-    read_file_safely, write_file_safely, log,
-    make_verbose_status_callback, make_standard_parser, safe_main,
-)
-
-# v4.21 C2 阶段:切分逻辑统一从 chunking.py 导入(消除重复定义)
-try:
-    from scripts.chunking import (  # noqa: E402
-        H2Block,
-        split_by_h2,
-        split_oversized_h2,
-        chunk_for_llm,
-        _split_by_chars,
-    )
-except ImportError:
-    from chunking import (  # type: ignore  # noqa: E402
-        H2Block,
-        split_by_h2,
-        split_oversized_h2,
-        chunk_for_llm,
-        _split_by_chars,
-    )
+    from _llm_vision import call_vision  # noqa: E402
+from utils import read_file_safely, write_file_safely, log  # noqa: E402
 
 
 # 配置 ------------------------------------------------------------
 
-# MAX_CHUNK_CHARS 由 chunking.DEFAULT_MAX_CHARS 提供(8000)
-# 此处 re-export 以保持向后兼容(test_purify_smooth.py 仍 import 此常量)
-try:
-    from scripts.chunking import DEFAULT_MAX_CHARS as MAX_CHUNK_CHARS  # noqa: E402
-except ImportError:
-    from chunking import DEFAULT_MAX_CHARS as MAX_CHUNK_CHARS  # type: ignore  # noqa: E402
-
+MAX_CHUNK_CHARS = 8000  # SKILL Gotcha:超出会让 LLM 自由发挥
 DEFAULT_MODEL = "claude-sonnet-4-5"
 
 
 # Prompt 模板 --------------------------------------------------------
 
-# v4.21 C1 收紧 prompt(v4.16 → v4.21 关键变化):
-#   - 原 v4.16: "只改写不通顺的句子" + "同义改写 OK" → 允许改字面
-#   - 新 v4.21: "只删不改" + "只重排不重写" → 严禁改字面
-# 设计原理(踩坑模式 M-02 / M-10 衍生):
-#   - LLM "改写" 会引入风格污染(把讲师原话改成书面语,丢失口语特征)
-#   - v4.18 智篆项目证实:同义改写过度导致 NO-INFO-LOSS FAIL
-#   - 重排(句序/合并短句)是 OK 的,因为不改变字面表述
-SMOOTH_PROMPT_TEMPLATE = """你是中文电商培训讲义文稿的"通顺化清理"专家。
-
-## 核心约束(v4.21 收紧)
-**只删不改、只重排不重写**。
-- ❌ **禁止同义改写原句**(把"嗯...今天讲电钻"改成"电钻是经典"是违规)
-- ❌ **禁止润色用词**(把"标签权重"改成"权重标签"是违规)
-- ❌ **禁止合并逻辑**相关的完整句子(只允许合并 ASR 串扰的同一句话)
-- ✅ **允许删除** ASR 装饰 / 时间戳 / 粗口 / 错乱中英俄混杂
-- ✅ **允许重排**:把两段短句换位,合并同一句话被拆成两半的情况
+SMOOTH_PROMPT_TEMPLATE = """你是中文电商培训讲义文稿的"通顺化重写"专家。
 
 ## 任务
-对以下一份已净化的 Markdown 章节做通顺化清理,**只做删除和重排**,
-**禁止改写原句字面表述**。
+对以下一份已净化的 Markdown 章节做通顺化重写,**只改写不通顺的句子**,
+**禁止删除或新增任何实质内容**(同义改写 OK)。
 
-## 必须清理(7 类,只删不重写)
-1. **行首时间戳**:`[HH:MM:SS]` / `[00:00:00]` / `(2026-09-12 ...)` 等转录痕迹 → 整行删除
-2. **粗口**:骂人字眼 → 整词删除
-3. **ASR 装饰**:`[掌声]` / `[笑声]` / `[音乐]` / `[沉默]` / `<|...|>` → 整段删除
-4. **ASR 串扰**:同一句话被前后重复(上半句 + 下半句独立)→ 合并为一句(只去重,不润色)
-5. **错乱中英俄混杂**:明显不属于这段话的英文单词残留 → 整词删除
-6. **不通顺短句**:`嗯...` / `啊...` / `那个...` / `就是...` 等填充 → 整词删除
-7. **重复词**:同一段内同一非专有名词 ≥ 3 次重复 → 删除多余(保留 2 次)
-
-## 允许重排(不改变字面)
-- 两段短句换位(如顺序影响理解)
-- 同一句话被拆开的两半合并(ASR 串扰)
-- 列表项顺序调整(若影响逻辑连贯性)
+## 必须清理
+1. **行首时间戳**:`[HH:MM:SS]` / `[00:00:00]` / `(2026-09-12 ...)` 等转录痕迹
+2. **粗口**:骂人字眼(整体删除或同义替换)
+3. **ASR 装饰**:`[掌声]` / `[笑声]` / `[音乐]` / `[沉默]` / `<|...|>` 等
+4. **ASR 串扰**:同一句话被前后重复(上半句 + 下半句独立),合并为一句
+5. **错乱中英俄混杂**:明显不属于这段话的英文单词残留(整体删除或同义改写)
+6. **不通顺短句**:段落中独立的"嗯..." "啊..." "那个..." "就是..." 等
+7. **重复词**:同一段内同一非专有名词 ≥ 3 次重复,合并或删除冗余
 
 ## 绝对禁止(违反则任务失败)
-1. ❌ **同义改写原句字面**(最重要!v4.21 收紧)
-2. ❌ 润色用词/调整语序(影响读者理解)
-3. ❌ 新增任何原文没有的句子、案例、数据、概念
-4. ❌ 删除原标题(## / ### / #### 不动,**只能清理标题下正文**)
-5. ❌ 改变章节数量
-6. ❌ 虚构案例、店铺、数据
-7. ❌ 改动标题文字(包括编号)
-8. ❌ 改动表格结构(列数 / 行数 / 表头)
-9. ❌ 改动列表项数量
+1. ❌ 新增任何原文没有的句子、案例、数据、概念
+2. ❌ 删除原标题(## / ### / #### 不动,**只能清理标题下正文**)
+3. ❌ 改变章节数量
+4. ❌ 虚构案例、店铺、数据
+5. ❌ 改动标题文字(包括编号)
+6. ❌ 改动表格结构(列数 / 行数 / 表头)
+7. ❌ 改动列表项数量
 
 ## 输出
 - 完整输出 Markdown 章节(不是 diff)
@@ -127,11 +78,10 @@ SMOOTH_PROMPT_TEMPLATE = """你是中文电商培训讲义文稿的"通顺化清
 - 保留所有表格 / 列表 / 引用块 / 加粗 / 行内代码
 - 保留所有图片引用(`![](...)`)
 - 保留所有超链接(`[text](url)`)
-- 句子字面与原文**一致**(只删 + 重排,不改字)
 
 ---
 
-## 输入章节(请**只删不重写**,严禁改字面)
+## 输入章节(请原样重写,只清理 7 类问题)
 
 {h2_content}
 
@@ -141,25 +91,131 @@ SMOOTH_PROMPT_TEMPLATE = """你是中文电商培训讲义文稿的"通顺化清
 """
 
 
-# 切分逻辑(从 chunking.py 导入,C2 阶段统一)------------------------
-# H2Block / split_by_h2 / split_oversized_h2 已在文件顶部从 chunking 导入
-# 旧 _split_by_chars 也已从 chunking 导入(若需要)
+# 切分逻辑 ---------------------------------------------------------
 
-def smooth_block(block: H2Block, model: str = DEFAULT_MODEL, on_status=None) -> str:
+@dataclass
+class H2Block:
+    """一个 H2 章节的切片"""
+    title_line: str       # `## 1. xxx` 行(含换行符)
+    content_lines: list[str]  # 该 H2 下的所有行(H3/正文/表格)
+    raw_text: str         # 整个块原始文本(便于送 LLM)
+
+
+_H2_RE = re.compile(r'^##\s+', re.MULTILINE)
+
+
+def split_by_h2(text: str) -> tuple[str, list[H2Block]]:
+    """按 H2 标题切分 markdown。
+
+    Returns:
+        (preamble, h2_blocks)
+        - preamble: 第一个 H2 之前的所有内容(通常含 H1 + frontmatter)
+        - h2_blocks: 按顺序排列的 H2 章节列表
+    """
+    # 找所有 H2 标题的行号
+    h2_positions: list[tuple[int, str]] = []  # (offset, full_line)
+    for m in _H2_RE.finditer(text):
+        line_start = m.start()
+        # 行结束位置
+        line_end = text.find('\n', line_start)
+        if line_end == -1:
+            line_end = len(text)
+        h2_positions.append((line_start, text[line_start:line_end + 1]))
+
+    if not h2_positions:
+        return text, []
+
+    preamble = text[:h2_positions[0][0]]
+    blocks: list[H2Block] = []
+    for i, (offset, line) in enumerate(h2_positions):
+        next_offset = h2_positions[i + 1][0] if i + 1 < len(h2_positions) else len(text)
+        block_text = text[offset:next_offset]
+        # 拆分 title_line 和 content_lines
+        lines = block_text.splitlines(keepends=True)
+        blocks.append(H2Block(
+            title_line=lines[0] if lines else line,
+            content_lines=lines[1:] if len(lines) > 1 else [],
+            raw_text=block_text,
+        ))
+    return preamble, blocks
+
+
+def split_oversized_h2(block: H2Block, max_chars: int = MAX_CHUNK_CHARS) -> list[H2Block]:
+    """对超大 H2 块按 H3 切分(每个子块仍属同一 H2)。
+
+    SKILL Gotcha:单块 > 8K chars 会让 LLM 自由发挥编造内容。
+    """
+    if len(block.raw_text) <= max_chars:
+        return [block]
+
+    # 按 ### 切
+    h3_re = re.compile(r'^###\s+', re.MULTILINE)
+    h3_positions = [m.start() for m in h3_re.finditer(block.raw_text)]
+
+    if not h3_positions:
+        # 无 H3 子节,只能强行按字符切(SKILL Gotcha 边缘 case)
+        log(f"[smooth] WARN: H2 块 {len(block.raw_text)} 字符无 H3,按 8K 强切")
+        return _split_by_chars(block, max_chars)
+
+    # 切分:preamble (text before first ###) + H3 sub-blocks
+    chunks: list[H2Block] = []
+    preamble_end = h3_positions[0]
+    preamble_text = block.raw_text[:preamble_end]
+    if preamble_text.strip():
+        chunks.append(H2Block(
+            title_line=block.title_line,
+            content_lines=preamble_text[len(block.title_line):].splitlines(keepends=True),
+            raw_text=block.title_line + preamble_text[len(block.title_line):],
+        ))
+
+    for i, start in enumerate(h3_positions):
+        end = h3_positions[i + 1] if i + 1 < len(h3_positions) else len(block.raw_text)
+        sub_text = block.raw_text[start:end]
+        chunks.append(H2Block(
+            title_line='',  # 子块无独立 H2 title(归属主 H2)
+            content_lines=sub_text.splitlines(keepends=True),
+            raw_text=sub_text,
+        ))
+
+    # 进一步检查每个子块 ≤ max_chars
+    final: list[H2Block] = []
+    for c in chunks:
+        if len(c.raw_text) <= max_chars:
+            final.append(c)
+        else:
+            final.extend(_split_by_chars(c, max_chars))
+    return final
+
+
+def _split_by_chars(block: H2Block, max_chars: int) -> list[H2Block]:
+    """兜底:按字符数强行切。"""
+    text = block.raw_text
+    chunks: list[H2Block] = []
+    for i in range(0, len(text), max_chars):
+        sub_text = text[i:i + max_chars]
+        chunks.append(H2Block(
+            title_line='',
+            content_lines=[sub_text],
+            raw_text=sub_text,
+        ))
+    return chunks
+
+
+# LLM 调用 ---------------------------------------------------------
+
+def smooth_block(block: H2Block, model: str = DEFAULT_MODEL) -> str:
     """调 LLM 对单个 H2 块做通顺化重写,返回新文本。
 
     容错:LLM 失败 / 返回非 markdown 时返回原文本(降级)。
-    v4.21 改用 safe_llm_call 统一 timeout/retry/status 分流。
-    v4.21 C4 阶段:on_status 回调(verbose 模式用)。
     """
     if not block.raw_text.strip():
         return block.raw_text
 
     prompt = SMOOTH_PROMPT_TEMPLATE.format(h2_content=block.raw_text)
-    response, status = safe_llm_call(prompt, model=model, on_status=on_status)
-
-    if status != "ok":
-        log(f"[smooth] LLM status={status};降级保留原文本")
+    try:
+        response = call_vision(prompt, [], model=model)
+    except Exception as e:
+        log(f"[smooth] LLM 调用失败: {e};降级保留原文本")
         return block.raw_text
 
     if not response or not response.strip():
@@ -202,22 +258,22 @@ def smooth_document(input_path: Path, output_path: Path,
                     model: str = DEFAULT_MODEL,
                     workers: int = 3,
                     max_chars: int = MAX_CHUNK_CHARS,
-                    dry_run: bool = False,
-                    verbose: bool = False) -> int:
-    """主入口:读 cleaned.md → 切 H2 → 并发调 LLM → 写 smoothed.md。
-
-    v4.21 C2 阶段:用 chunk_for_llm 替代手写 split_by_h2 + split_oversized_h2 组合。
-    v4.21 C4 阶段:verbose=True 时,LLM status 写到 stderr(便于 debug)。
-    """
+                    dry_run: bool = False) -> int:
+    """主入口:读 cleaned.md → 切 H2 → 并发调 LLM → 写 smoothed.md。"""
     if not input_path.exists():
         log(f"ERROR: 输入文件不存在:{input_path}")
         return 1
 
     content = read_file_safely(input_path)
-    # v4.21 C2:用 chunk_for_llm 统一入口(替代 split_by_h2 + split_oversized_h2 二次循环)
-    preamble, all_chunks = chunk_for_llm(content, max_chars=max_chars)
+    preamble, h2_blocks = split_by_h2(content)
 
-    log(f"[smooth] 切分:共 {len(all_chunks)} 个 LLM 单元(每块 ≤ {max_chars} chars)")
+    log(f"[smooth] 切分:{len(h2_blocks)} 个 H2 章节")
+
+    # 二次切分(超大块按 H3 拆)
+    all_chunks: list[H2Block] = []
+    for block in h2_blocks:
+        all_chunks.extend(split_oversized_h2(block, max_chars))
+    log(f"[smooth] 二次切分后:共 {len(all_chunks)} 个 LLM 单元(每块 ≤ {max_chars} chars)")
 
     if dry_run:
         log("[smooth] dry-run 模式,跳过 LLM 调用")
@@ -226,14 +282,11 @@ def smooth_document(input_path: Path, output_path: Path,
             log(f"       preview: {c.raw_text[:60].strip()}...")
         return 0
 
-    # v4.21 C4:verbose 模式时,L2 LLM 脚本也支持 status 回调
-    on_status = make_verbose_status_callback("smooth") if verbose else None
-
     # 并发调 LLM
     smoothed_blocks: list[str] = [''] * len(all_chunks)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_idx = {
-            executor.submit(smooth_block, block, model, on_status): i
+            executor.submit(smooth_block, block, model): i
             for i, block in enumerate(all_chunks)
         }
         for future in as_completed(future_to_idx):
@@ -251,9 +304,9 @@ def smooth_document(input_path: Path, output_path: Path,
     if not output.endswith('\n'):
         output += '\n'
 
-    # 标题守恒校验(v4.21 C2:用 all_chunks 替代原 h2_blocks,因 chunk_for_llm 已含 H3 切分)
+    # 标题守恒校验
     original_titles = [H2Block(title_line='', content_lines=[], raw_text=b.raw_text)
-                       for b in all_chunks]
+                       for b in h2_blocks]
     ok, msg = validate_title_preservation(original_titles, output)
     if not ok:
         log(f"[smooth] WARN: {msg}")
@@ -268,18 +321,18 @@ def smooth_document(input_path: Path, output_path: Path,
 # CLI -------------------------------------------------------------
 
 def main() -> int:
-    # v4.22 F4:用 make_standard_parser 统一 boilerplate
-    parser = make_standard_parser(
-        'v4.16 通顺化重写(per H2 独立 LLM)',
-        add_dry_run=True,
-        add_workers=True,
+    parser = argparse.ArgumentParser(
+        description='v4.16 通顺化重写(per H2 独立 LLM)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('input', help='输入 cleaned.md 路径')
     parser.add_argument('-o', '--output', required=True, type=Path,
                         help='输出 smoothed.md 路径')
     parser.add_argument('--model', default=DEFAULT_MODEL, help='LLM 模型 ID')
+    parser.add_argument('--workers', type=int, default=3, help='并发 LLM 调用数')
     parser.add_argument('--max-chars', type=int, default=MAX_CHUNK_CHARS,
                         help=f'单块字符上限(默认 {MAX_CHUNK_CHARS},SKILL Gotcha)')
+    parser.add_argument('--dry-run', action='store_true', help='只输出切分信息,不调 LLM')
     args = parser.parse_args()
 
     input_path = Path(args.input).resolve()
@@ -293,9 +346,8 @@ def main() -> int:
         workers=args.workers,
         max_chars=args.max_chars,
         dry_run=args.dry_run,
-        verbose=args.verbose,
     )
 
 
 if __name__ == '__main__':
-    sys.exit(safe_main(main))
+    sys.exit(main())

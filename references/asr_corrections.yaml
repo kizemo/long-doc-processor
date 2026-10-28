@@ -22,7 +22,8 @@
 #                      建国资产 / 放弹 / 相产品均头 / 相产品国际 / GGC (10 条)
 #   - v4.17 phase-1.7: 演书服 / 桌教店 / 打笔 / 主途 / 燃品 / 空投产 / 汉堡国 / 空点机 (8 条)
 #   - safe_replacements_2.json 已有: 心客 / 打爆(同店) / AI助力 (3 条)
-#   - 合计 41 条;按"电商场景高频 + 边界 / 智篆 / 老草项目实证"筛选保留全部
+#   - v4.21 玺承 2026 双十一项目: 磁包 / 控电机 / 相似品跟头 / 货源券 (4 条)
+#   - 合计 45 条;按"电商场景高频 + 边界 / 智篆 / 老草 / 玺承项目实证"筛选保留全部
 
 rules:
   # === 长词(4-7 字),极高置信度,无 context 必替换 ===
@@ -73,6 +74,21 @@ rules:
   - {from: "打爆",         to: "打散",     context: "同店"}
   - {from: "GGC",          to: "GGV"}
   - {from: "AI助力",       to: "AI 助力"}
+
+  # === v4.22 玺承 2026 双十一备战项目(电商运营/直通车/会员场景) ===
+  # 直通车相关 — 启用 phonetic:true 捕获 ASR 同音变体(如 恐点鸡/次包)
+  - {from: "磁包",         to: "词包"}                                                # 智能计划/趋势计划 词汇包
+  - {from: "控点击",       to: "控点击",   context: "投放|计划|出价|成交|板块|对不对", phonetic: true} # 同: 控电机 / 恐点鸡
+  - {from: "相似品跟投",   to: "相似品跟投", phonetic: true}                            # 关键词计划场景: 同 相似品跟头
+  # 会员/CRM 相关
+  - {from: "会员券",       to: "会员券",   context: "VIP|会员|权益|券",  phonetic: true}   # 同: VIP货源券
+  - {from: "滋损",         to: "资损"}                                              # 资金损失(滋 zī = 资 zī, 字面错听)
+  # 高频 ASR 同音混淆兜底(phonetic 模式):
+  - {from: "词包",         to: "词包",     phonetic: true}                              # 同: 次包 / 茨包 / 磁包
+  - {from: "主图",         to: "主图",     phonetic: true}                              # 同: 主途 / 主视图(短语) / 猪图
+  - {from: "点击率",       to: "点击率",   phonetic: true}                              # 同: 点击力 / 点几率 / 电击率
+  - {from: "控投产",       to: "控投产",   phonetic: true}                              # 同: 空投产 / 控从产
+  - {from: "控点机",       to: "控点机"}                                              # 同: 空点机 / 恐点鸡(被控点击 phonetic覆盖)
 
 # 注:本文件由 scripts/_post_terms_fix.py 自动加载;修改后无需重装 skill。
 # 项目级覆盖:cp 本文件到 output/test-crv2/asr_corrections.yaml 后编辑

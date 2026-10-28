@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from scripts._llm_vision import call_vision  # absolute import — pytest 把 rootdir 加进 sys.path, scripts 作为 namespace package
+from scripts.frames_meta import load_frames_meta  # noqa: E402
 
 
 PROMPT_TEMPLATE = """你是电商培训视频内容匹配专家。下面是视频中 {n_frames} 个候选关键帧(每帧:时间戳 + OCR文本)
@@ -108,13 +109,14 @@ def parse_stage1_response(llm_response: str) -> list[dict]:
 
 
 def run_stage1(frames_json: Path, cleaned_md: Path, output_json: Path,
+               ocr_dir: Path | None = None,
                max_count: int = 8, score_threshold: float = 0.65) -> list[dict]:
     """读 frames.json + cleaned.md,调 LLM,filter score,写 top8.json。
 
     Returns:
         Top-N 候选帧 list,按 score 降序
     """
-    frames = json.loads(frames_json.read_text(encoding="utf-8"))
+    frames = load_frames_meta(frames_json, ocr_dir=ocr_dir)
     md_text = cleaned_md.read_text(encoding="utf-8")
 
     # 提取 H3 标题列表
@@ -147,8 +149,10 @@ def main() -> int:
     parser.add_argument("--cleaned-md", required=True, type=Path)
     parser.add_argument("--output-json", required=True, type=Path)
     parser.add_argument("--max-count", type=int, default=8)
+    parser.add_argument("--ocr-dir", type=Path, help="关键帧 OCR 文本目录(<id>.ocr.txt)")
     args = parser.parse_args()
-    run_stage1(args.frames_json, args.cleaned_md, args.output_json, max_count=args.max_count)
+    run_stage1(args.frames_json, args.cleaned_md, args.output_json,
+               ocr_dir=args.ocr_dir, max_count=args.max_count)
     return 0
 
 

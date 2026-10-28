@@ -83,6 +83,26 @@ def ocr_image(path: Path) -> str:
         return f"[OCR unavailable: {path.name}]"
 
 
+def extract_from_image_dir(src: Path, out_dir: Path) -> list[Path]:
+    """A directory that directly contains images (e.g. a crv frames/ dir).
+
+    `references/image-pipeline.md` 视频关键帧节写的命令是
+        python scripts/ocr_images.py <源目录>/frames <源目录>/frames_ocr/
+    但旧实现把"目录"一律当成 markdown 目录去扫 md 引用 ——
+    纯帧目录里没有 md，于是**静默抽出 0 张图**，
+    后面 Step V1 的"关键帧 OCR 抽取完成"是假的。
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results: list[Path] = []
+    for p in sorted(src.iterdir()):
+        if p.is_file() and p.suffix.lower() in IMG_EXTS:
+            target = out_dir / p.name
+            if not target.exists():
+                shutil.copy2(p, target)
+            results.append(target)
+    return results
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
         print("Usage: python ocr_images.py <input> <output_dir>", file=sys.stderr)
@@ -97,10 +117,18 @@ def main(argv: list[str]) -> int:
     elif src.suffix.lower() == ".xmind":
         images = extract_from_xmind(src, out)
     elif src.is_dir():
-        images = extract_from_markdown_dir(src, out)
+        # 直接就是图片目录(视频关键帧) vs markdown 目录 —— 先判前者
+        direct = [p for p in sorted(src.iterdir())
+                  if p.is_file() and p.suffix.lower() in IMG_EXTS]
+        if direct:
+            images = extract_from_image_dir(src, out)
+        else:
+            images = extract_from_markdown_dir(src, out)
     else:
         print(f"ERROR: unsupported input: {src}", file=sys.stderr)
         return 1
+    if not images:
+        print(f"WARN: 没有找到任何图片({src});OCR 步骤将产出 0 条文本", file=sys.stderr)
     for img in images:
         text = ocr_image(img)
         (out / f"{img.stem}.ocr.txt").write_text(text, encoding="utf-8")
